@@ -3,11 +3,12 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.akimare.discord-bot</string>
+    <string>com.akimare.bot-kb</string>
     <key>ProgramArguments</key>
     <array>
         <string>/Users/akimare/discord-bots/.venv/bin/python</string>
         <string>/Users/akimare/discord-bots/bot.py</string>
+        <string>kb</string>
     </array>
     <key>WorkingDirectory</key>
     <string>/Users/akimare/discord-bots</string>
@@ -16,9 +17,9 @@
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/Users/akimare/discord-bots/logs/bot.log</string>
+    <string>/Users/akimare/discord-bots/logs/kb.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/akimare/discord-bots/logs/bot.error.log</string>
+    <string>/Users/akimare/discord-bots/logs/kb.error.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>

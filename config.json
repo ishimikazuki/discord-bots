@@ -1,19 +1,27 @@
 {
-  "projects": {
+  "bots": {
+    "general": {
+      "name": "general",
+      "token_keychain_account": "general-bot-token",
+      "dir": "~",
+      "emoji": "🏠",
+      "control_channel_id": null
+    },
     "kb": {
       "name": "knowledge-hub",
+      "token_keychain_account": "kb-bot-token",
       "dir": "~/knowledge-hub",
       "emoji": "📚",
       "control_channel_id": null
     },
-    "general": {
-      "name": "general",
+    "reserved": {
+      "name": "reserved",
+      "token_keychain_account": "reserved-bot-token",
       "dir": "~",
-      "emoji": "🏠",
+      "emoji": "🔧",
       "control_channel_id": null
     }
   },
-  "default_project": "general",
   "notify_channel_id": null,
   "allowed_users": [],
   "auto_pull_before_session": true,
