@@ -191,7 +191,8 @@ async def run_claude_code(work_dir: str, prompt: str, session_id: str | None) ->
     if session_id:
         args.extend(["--resume", session_id])
 
-    env = {**os.environ, "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"}
+    home = Path.home()
+    env = {**os.environ, "PATH": f"{home}/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"}
 
     proc = await asyncio.create_subprocess_exec(
         *args,
