@@ -1,0 +1,23 @@
+{
+  "projects": {
+    "kb": {
+      "name": "knowledge-hub",
+      "dir": "~/knowledge-hub",
+      "emoji": "📚",
+      "control_channel_id": null
+    },
+    "general": {
+      "name": "general",
+      "dir": "~",
+      "emoji": "🏠",
+      "control_channel_id": null
+    }
+  },
+  "default_project": "general",
+  "notify_channel_id": null,
+  "allowed_users": [],
+  "auto_pull_before_session": true,
+  "worktree_enabled": true,
+  "claude_timeout_seconds": 300,
+  "claude_max_turns": 25
+}

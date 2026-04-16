@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# Discord Bot (Python) - Mac mini セットアップスクリプト
+# Discord Bot (Python v2) - Mac mini セットアップスクリプト
 # ============================================================================
 # 使い方: Mac mini 上で実行
 #   cd ~/discord-bots && bash setup-macmini.sh
@@ -13,41 +13,57 @@ VENV="$BOTDIR/.venv"
 PLIST_SRC="$BOTDIR/com.akimare.discord-bot-py.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/com.akimare.discord-bot.plist"
 
-echo "=== Discord Bot (Python) Setup ==="
+echo "=== Discord Bot (Python v2) Setup ==="
+echo "User: $(whoami) | Home: $HOME"
 
 # 1. Python3 チェック
 if ! command -v python3 &>/dev/null; then
-    echo "[ERROR] python3 が見つかりません。先にインストールしてください:"
-    echo "  /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+    echo "[ERROR] python3 が見つかりません:"
     echo "  brew install python3"
     exit 1
 fi
 echo "[OK] python3: $(python3 --version)"
 
 # 2. Claude CLI チェック
-if ! command -v claude &>/dev/null; then
-    echo "[WARN] claude CLI が見つかりません。npm でインストールしてください:"
+if command -v claude &>/dev/null; then
+    echo "[OK] claude: $(claude --version 2>/dev/null || echo 'installed')"
+else
+    echo "[WARN] claude CLI が見つかりません:"
     echo "  npm install -g @anthropic-ai/claude-code"
-    echo "  （または brew install node → npm install -g @anthropic-ai/claude-code）"
 fi
 
-# 3. venv 作成
+# 3. Git チェック
+if ! command -v git &>/dev/null; then
+    echo "[ERROR] git が見つかりません:"
+    echo "  brew install git"
+    exit 1
+fi
+echo "[OK] git: $(git --version)"
+
+# 4. venv 作成
 if [ ! -d "$VENV" ]; then
     echo "[SETUP] Python venv を作成中..."
     python3 -m venv "$VENV"
 fi
 echo "[OK] venv: $VENV"
 
-# 4. 依存インストール
+# 5. 依存インストール
 echo "[SETUP] パッケージをインストール中..."
 "$VENV/bin/pip" install --upgrade pip -q
 "$VENV/bin/pip" install -r "$BOTDIR/requirements.txt" -q
 echo "[OK] discord.py インストール完了"
 
-# 5. ログディレクトリ
+# 6. ログディレクトリ
 mkdir -p "$BOTDIR/logs"
 
-# 6. Keychain にトークンが登録されているか確認
+# 7. config.json 確認
+if [ ! -f "$BOTDIR/config.json" ]; then
+    echo "[ERROR] config.json が見つかりません。リポジトリを再 clone してください。"
+    exit 1
+fi
+echo "[OK] config.json 存在確認"
+
+# 8. Keychain にトークンが登録されているか確認
 if ! security find-generic-password -a "general-bot-token" -s "discord-bot" -w &>/dev/null; then
     echo ""
     echo "[WARN] キーチェーンに Discord bot トークンが登録されていません。"
@@ -55,15 +71,18 @@ if ! security find-generic-password -a "general-bot-token" -s "discord-bot" -w &
     echo ""
     echo "  security add-generic-password -a \"general-bot-token\" -s \"discord-bot\" -w \"YOUR_TOKEN_HERE\""
     echo ""
+    echo "  ※ トークンを登録してからもう一度 setup-macmini.sh を実行してください。"
+    exit 1
 fi
+echo "[OK] Keychain トークン確認済み"
 
-# 7. 旧 Node.js 版の launchd を停止（あれば）
-if launchctl list | grep -q "com.akimare.discord-bot" 2>/dev/null; then
+# 9. 旧 bot の launchd を停止（あれば）
+if launchctl list 2>/dev/null | grep -q "com.akimare.discord-bot"; then
     echo "[SETUP] 旧 bot を停止中..."
     launchctl unload "$PLIST_DST" 2>/dev/null || true
 fi
 
-# 8. plist をコピーして登録
+# 10. plist をユーザーのホームに合わせて生成 & 登録
 echo "[SETUP] launchd に登録中..."
 sed "s|/Users/akimare|$HOME|g" "$PLIST_SRC" > "$PLIST_DST"
 launchctl load "$PLIST_DST"
@@ -75,9 +94,8 @@ echo "確認コマンド:"
 echo "  launchctl list | grep discord     # プロセス確認"
 echo "  tail -f ~/discord-bots/logs/bot.log  # ログ確認"
 echo ""
-echo "停止:"
-echo "  launchctl unload ~/Library/LaunchAgents/com.akimare.discord-bot.plist"
+echo "更新 (git pull → 再起動):"
+echo "  cd ~/discord-bots && git pull && launchctl unload $PLIST_DST && launchctl load $PLIST_DST"
 echo ""
-echo "再起動:"
-echo "  launchctl unload ~/Library/LaunchAgents/com.akimare.discord-bot.plist"
-echo "  launchctl load ~/Library/LaunchAgents/com.akimare.discord-bot.plist"
+echo "停止:"
+echo "  launchctl unload $PLIST_DST"

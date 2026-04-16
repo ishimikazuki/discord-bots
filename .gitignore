@@ -6,3 +6,4 @@ sessions.json
 .env
 __pycache__/
 *.pyc
+.worktrees/
