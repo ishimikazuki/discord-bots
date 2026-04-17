@@ -220,8 +220,10 @@ async def run_claude_code(work_dir: str, prompt: str, session_id: str | None) ->
         except json.JSONDecodeError:
             return {"text": stdout.decode().strip() or "(no response)", "sessionId": None, "cost": 0}
     else:
-        err = stderr.decode()[:500]
-        raise RuntimeError(f"Claude Code exited {proc.returncode}: {err}")
+        err = stderr.decode()[:300]
+        out = stdout.decode()[:200]
+        print(f"[claude] exit={proc.returncode} stderr={err} stdout={out}", file=sys.stderr)
+        raise RuntimeError(f"Claude Code exited {proc.returncode}: {err or out}")
 
 
 # ---------------------------------------------------------------------------
