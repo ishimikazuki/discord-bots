@@ -62,9 +62,24 @@ def get_from_keychain(account: str) -> str | None:
         return None
 
 
-BOT_TOKEN = get_from_keychain(BOT_CONFIG["token_keychain_account"])
+def get_from_env_file(account: str) -> str | None:
+    env_file = Path(__file__).parent / ".env"
+    if not env_file.exists():
+        return None
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            key, val = line.split("=", 1)
+            if key.strip() == account:
+                return val.strip()
+    return None
+
+
+BOT_TOKEN = get_from_env_file(BOT_CONFIG["token_keychain_account"]) or get_from_keychain(BOT_CONFIG["token_keychain_account"])
 if not BOT_TOKEN:
-    print(f"[FATAL] {BOT_CONFIG['token_keychain_account']} not found in keychain", file=sys.stderr)
+    print(f"[FATAL] {BOT_CONFIG['token_keychain_account']} not found in .env or keychain", file=sys.stderr)
     sys.exit(1)
 
 PROJECT_DIR = str(Path(BOT_CONFIG["dir"]).expanduser())
