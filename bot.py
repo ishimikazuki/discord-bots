@@ -389,12 +389,41 @@ async def handle_close(thread: discord.Thread) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Main handler: new session via thread
+# Main handler: new session via thread (text channel)
 # ---------------------------------------------------------------------------
 
 async def handle_new_session(message: discord.Message, text: str) -> None:
     thread_name = build_thread_name(text)
     thread = await message.create_thread(name=thread_name, auto_archive_duration=1440)
+    await _start_session(thread, text, thread_name)
+
+
+# ---------------------------------------------------------------------------
+# Main handler: new session via forum post
+# ---------------------------------------------------------------------------
+
+async def handle_forum_new_session(message: discord.Message, text: str) -> None:
+    thread = message.channel  # Already a thread (forum post)
+    await _start_session(thread, text, thread.name)
+
+
+async def _start_session(thread, text: str, thread_name: str) -> None:
+    # Reserve session immediately to prevent duplicate processing
+    sessions = load_sessions()
+    if str(thread.id) in sessions:
+        return  # Already being processed
+    sessions[str(thread.id)] = {
+        "sessionId": None,
+        "projectDir": PROJECT_DIR,
+        "workDir": PROJECT_DIR,
+        "worktreePath": None,
+        "threadName": thread_name,
+        "createdAt": now_iso(),
+        "lastUsed": now_iso(),
+        "messageCount": 0,
+        "pending": True,
+    }
+    save_sessions(sessions)
 
     if AUTO_PULL:
         err = git_pull(PROJECT_DIR)
@@ -411,19 +440,18 @@ async def handle_new_session(message: discord.Message, text: str) -> None:
         result = await run_claude_code(work_dir, text, None)
         typing.stop()
 
-        if result["sessionId"]:
-            sessions = load_sessions()
-            sessions[str(thread.id)] = {
-                "sessionId": result["sessionId"],
-                "projectDir": PROJECT_DIR,
-                "workDir": work_dir,
-                "worktreePath": worktree_path,
-                "threadName": thread_name,
-                "createdAt": now_iso(),
-                "lastUsed": now_iso(),
-                "messageCount": 1,
-            }
-            save_sessions(sessions)
+        sessions = load_sessions()
+        sessions[str(thread.id)] = {
+            "sessionId": result.get("sessionId"),
+            "projectDir": PROJECT_DIR,
+            "workDir": work_dir,
+            "worktreePath": worktree_path,
+            "threadName": thread_name,
+            "createdAt": now_iso(),
+            "lastUsed": now_iso(),
+            "messageCount": 1,
+        }
+        save_sessions(sessions)
 
         await send_long_message(thread, result["text"])
 
@@ -448,8 +476,8 @@ async def handle_thread_message(message: discord.Message) -> None:
     session = sessions.get(str(message.channel.id))
 
     if not session:
-        await message.reply("No active session. Start a new one in the channel.")
-        return
+        print(f"[DEBUG] handle_thread_message: no session for {message.channel.id}, msg={message.id}")
+        return  # Silently ignore instead of spamming
 
     work_dir = session.get("workDir", session["projectDir"])
 
@@ -511,6 +539,9 @@ intents.dm_messages = True
 
 client = discord.Client(intents=intents)
 
+# Dedup: prevent processing the same message multiple times
+_processed_messages: set[int] = set()
+
 
 @client.event
 async def on_ready():
@@ -525,6 +556,11 @@ async def on_ready():
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
+    if message.id in _processed_messages:
+        return
+    _processed_messages.add(message.id)
+    if len(_processed_messages) > 1000:
+        _processed_messages.clear()
     if ALLOWED_USERS and message.author.id not in ALLOWED_USERS:
         return
 
@@ -562,7 +598,22 @@ async def on_message(message: discord.Message):
         return
 
     if is_thread:
+        # Only respond to threads in our control channel (forum) or mentions
+        parent = getattr(message.channel, 'parent', None)
+        parent_id = getattr(parent, 'id', None) or getattr(message.channel, 'parent_id', None)
+        is_our_channel = CONTROL_CHANNEL_ID and parent_id == CONTROL_CHANNEL_ID
+        is_mention = client.user in message.mentions
+        print(f"[thread] parent_id={parent_id} control={CONTROL_CHANNEL_ID} is_ours={is_our_channel} mention={is_mention}")
+
+        if not is_our_channel and not is_mention:
+            # Check if we have an existing session for this thread
+            sessions = load_sessions()
+            if str(message.channel.id) not in sessions:
+                return  # Not our thread, ignore silently
+
         content = re.sub(rf"<@!?{client.user.id}>", "", message.content).strip()
+        if not content:
+            content = message.content.strip()
         cmd = parse_command(content)
         if cmd["type"] == "close":
             await handle_close(message.channel)
@@ -570,7 +621,15 @@ async def on_message(message: discord.Message):
         if cmd["type"] == "sessions":
             await handle_sessions(message.channel)
             return
-        await handle_thread_message(message)
+
+        # Existing session → continue, new thread in our channel → start session
+        sessions = load_sessions()
+        if str(message.channel.id) in sessions:
+            await handle_thread_message(message)
+        elif is_our_channel:
+            await handle_forum_new_session(message, content)
+        elif is_mention:
+            await message.reply(f"No active session. Post in <#{CONTROL_CHANNEL_ID}> to start one.")
         return
 
     if is_dm:

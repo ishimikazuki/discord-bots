@@ -5,24 +5,24 @@
       "token_keychain_account": "general-bot-token",
       "dir": "~",
       "emoji": "🏠",
-      "control_channel_id": null
+      "control_channel_id": 1496067518975184907
     },
     "kb": {
       "name": "knowledge-hub",
       "token_keychain_account": "kb-bot-token",
       "dir": "~/knowledge-hub",
       "emoji": "📚",
-      "control_channel_id": null
+      "control_channel_id": 1496067522120908951
     },
     "reserved": {
       "name": "reserved",
       "token_keychain_account": "reserved-bot-token",
       "dir": "~",
       "emoji": "🔧",
-      "control_channel_id": null
+      "control_channel_id": 1496067525727752403
     }
   },
-  "notify_channel_id": null,
+  "notify_channel_id": 1496067529364344933,
   "allowed_users": [],
   "auto_pull_before_session": true,
   "worktree_enabled": true,
