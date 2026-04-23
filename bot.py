@@ -249,12 +249,16 @@ async def run_claude_code(work_dir: str, prompt: str, session_id: str | None) ->
     home = Path.home()
     env = {**os.environ, "PATH": f"{home}/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"}
 
+    # stream-json events for tool_use / tool_result can blow past the 64 KiB
+    # default buffer; raise it so readline() doesn't die with
+    # "Separator is found, but chunk is longer than limit".
     proc = await asyncio.create_subprocess_exec(
         *args,
         cwd=work_dir,
         env=env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        limit=10 * 1024 * 1024,
     )
 
     loop = asyncio.get_event_loop()
