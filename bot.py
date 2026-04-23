@@ -9,11 +9,13 @@ project directory, and session state.
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
 import sys
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -26,6 +28,16 @@ from attachments import (
     filter_sendable,
     format_inbox_for_prompt,
 )
+
+# launchd captures stderr into <bot>.err.log. Route discord.py internals there
+# so gateway reconnect / rate-limit / auth failures are visible post-mortem.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    stream=sys.stderr,
+)
+logging.getLogger("discord").setLevel(logging.INFO)
+logging.getLogger("discord.gateway").setLevel(logging.INFO)
 
 # ---------------------------------------------------------------------------
 # Boot: resolve bot name from argv
@@ -722,15 +734,50 @@ _processed_messages: set[int] = set()
 
 @client.event
 async def on_ready():
+    # Startup info goes to the per-bot log file; posting to #agent-notify on
+    # every boot floods the channel when launchd restart-loops a crashing bot.
     print(f"[{BOT_NAME}] Logged in as {client.user}")
     print(f"[{BOT_NAME}] Project: {PROJECT_DISPLAY} -> {PROJECT_DIR}")
     print(f"[{BOT_NAME}] Control channel: {CONTROL_CHANNEL_ID or 'any (mention or DM)'}")
     print(f"[{BOT_NAME}] Auto-pull: {AUTO_PULL} | Worktree: {WORKTREE_ENABLED}")
-    await notify(f"🟢 [{PROJECT_DISPLAY}] Bot started: {client.user}")
+
+
+@client.event
+async def on_disconnect():
+    # discord.py auto-reconnects, but we want the kill-the-process class of
+    # disconnects visible in err.log so we can spot restart-loop causes.
+    print(f"[{BOT_NAME}] DISCONNECTED from Discord gateway", file=sys.stderr)
+
+
+@client.event
+async def on_resumed():
+    print(f"[{BOT_NAME}] RESUMED gateway session", file=sys.stderr)
+
+
+@client.event
+async def on_error(event, *args, **kwargs):
+    # Default handler only prints to stderr without the bot name prefix.
+    # We want an easy grep pattern so yumekano-coe-style crashes are obvious.
+    print(
+        f"[{BOT_NAME}] UNHANDLED in {event}: {traceback.format_exc()}",
+        file=sys.stderr,
+    )
 
 
 @client.event
 async def on_message(message: discord.Message):
+    try:
+        await _handle_message(message)
+    except Exception:
+        print(
+            f"[{BOT_NAME}] UNHANDLED in on_message "
+            f"(channel={message.channel.id} msg={message.id}):\n"
+            f"{traceback.format_exc()}",
+            file=sys.stderr,
+        )
+
+
+async def _handle_message(message: discord.Message):
     if message.author.bot:
         return
     if message.id in _processed_messages:
