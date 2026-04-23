@@ -20,6 +20,8 @@ from pathlib import Path
 import discord
 from discord import ChannelType, Intents
 
+from mention_helpers import is_bot_addressed, strip_mentions
+
 # ---------------------------------------------------------------------------
 # Boot: resolve bot name from argv
 # ---------------------------------------------------------------------------
@@ -394,7 +396,24 @@ async def handle_close(thread: discord.Thread) -> None:
 
 async def handle_new_session(message: discord.Message, text: str) -> None:
     thread_name = build_thread_name(text)
-    thread = await message.create_thread(name=thread_name, auto_archive_duration=1440)
+
+    # Prefer creating the thread inside this bot's dedicated forum so the
+    # conversation lives next to its siblings (see: mention-in-#一般 → forum).
+    forum = client.get_channel(CONTROL_CHANNEL_ID) if CONTROL_CHANNEL_ID else None
+    if isinstance(forum, discord.ForumChannel):
+        created = await forum.create_thread(
+            name=thread_name,
+            content=f"From {message.author.mention} in {message.channel.mention}: {text}",
+            auto_archive_duration=1440,
+        )
+        thread = created.thread
+        await message.reply(
+            f"→ {thread.mention} で続きはこっちでお話しするよ♡",
+            mention_author=False,
+        )
+    else:
+        thread = await message.create_thread(name=thread_name, auto_archive_duration=1440)
+
     await _start_session(thread, text, thread_name)
 
 
@@ -564,12 +583,25 @@ async def on_message(message: discord.Message):
     if ALLOWED_USERS and message.author.id not in ALLOWED_USERS:
         return
 
+    # Collect mention info once. Role mentions make `@bot-name` (role) work
+    # the same as pinging the bot user directly.
+    my_role_ids: set[int] = set()
+    if message.guild and message.guild.me:
+        my_role_ids = {r.id for r in message.guild.me.roles if not r.is_default()}
+    user_mention_ids = {u.id for u in message.mentions}
+    role_mention_ids = {r.id for r in message.role_mentions}
+    is_mention = is_bot_addressed(
+        user_mention_ids, role_mention_ids, client.user.id, my_role_ids
+    )
+
     is_dm = message.channel.type == ChannelType.private
     is_thread = message.channel.type in (ChannelType.public_thread, ChannelType.private_thread)
     is_guild_text = message.channel.type == ChannelType.text
 
     if is_guild_text:
-        content = re.sub(rf"<@!?{client.user.id}>", "", message.content).strip()
+        content = strip_mentions(
+            message.content, {client.user.id}, my_role_ids
+        )
         if not content:
             content = "hello"
 
@@ -587,7 +619,6 @@ async def on_message(message: discord.Message):
             return
 
         # Only respond in control channel (if set) or to mentions
-        is_mention = client.user in message.mentions
         is_control = CONTROL_CHANNEL_ID and message.channel.id == CONTROL_CHANNEL_ID
 
         if not (is_mention or is_control):
@@ -602,7 +633,6 @@ async def on_message(message: discord.Message):
         parent = getattr(message.channel, 'parent', None)
         parent_id = getattr(parent, 'id', None) or getattr(message.channel, 'parent_id', None)
         is_our_channel = CONTROL_CHANNEL_ID and parent_id == CONTROL_CHANNEL_ID
-        is_mention = client.user in message.mentions
         print(f"[thread] parent_id={parent_id} control={CONTROL_CHANNEL_ID} is_ours={is_our_channel} mention={is_mention}")
 
         if not is_our_channel and not is_mention:
@@ -611,7 +641,7 @@ async def on_message(message: discord.Message):
             if str(message.channel.id) not in sessions:
                 return  # Not our thread, ignore silently
 
-        content = re.sub(rf"<@!?{client.user.id}>", "", message.content).strip()
+        content = strip_mentions(message.content, {client.user.id}, my_role_ids)
         if not content:
             content = message.content.strip()
         cmd = parse_command(content)

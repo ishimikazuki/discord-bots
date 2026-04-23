@@ -1,0 +1,23 @@
+<document>
+  <project_overview>
+    <purpose>Discord bot 群からメンションで Claude Code を呼び、bot 毎のフォーラムでスレッド会話する</purpose>
+    <tech_stack>Python 3.13 + discord.py 2.x / Claude Code CLI (OAuth) / macOS launchd LaunchAgent</tech_stack>
+    <phase>production on kazuki-macmini (remote mac mini), 4 bots: general / kb / reserved / yumekano-coe</phase>
+  </project_overview>
+
+  <rules>
+    <rule>bot は kazuki-macmini の GUI セッション LaunchAgent として動かす（login keychain access が必須）</rule>
+    <rule>#一般 でロール/ユーザーメンション → bot 専用フォーラムに新スレッドを自動作成</rule>
+    <rule>plist は generate-plists.sh が config.json から動的に出力する（bot 追加 → 再実行で反映）</rule>
+  </rules>
+
+  <current_work>PLANS.md を参照</current_work>
+
+  <decisions>
+    <decision date="2026-04-22">ssh nohup 起動は keychain ロックで claude OAuth 読めず不可。LaunchAgent + gui/$UID 必須</decision>
+    <decision date="2026-04-22">bot 毎に専用フォーラム（案A）。共通ロールだと全 bot が一斉反応するため却下</decision>
+    <decision date="2026-04-22">plist 命名を com.kazuki-macmini.discord-bot-* に変更し旧 com.akimare.* と衝突回避</decision>
+  </decisions>
+
+  <logs>PROJECT_LOG/INDEX.md</logs>
+</document>
