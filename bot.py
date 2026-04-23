@@ -98,7 +98,11 @@ ALLOWED_USERS: list[int] = CONFIG.get("allowed_users", [])
 NOTIFY_CHANNEL_ID: int | None = CONFIG.get("notify_channel_id")
 AUTO_PULL = CONFIG.get("auto_pull_before_session", True)
 WORKTREE_ENABLED = CONFIG.get("worktree_enabled", True)
-CLAUDE_TIMEOUT = CONFIG.get("claude_timeout_seconds", 300)
+CLAUDE_IDLE_TIMEOUT = CONFIG.get(
+    "claude_idle_timeout_seconds",
+    CONFIG.get("claude_timeout_seconds", 300),
+)
+CLAUDE_HARD_TIMEOUT = CONFIG.get("claude_hard_timeout_seconds", 3600)
 CLAUDE_MAX_TURNS = CONFIG.get("claude_max_turns", 25)
 
 SESSIONS_FILE = Path(__file__).parent / f"sessions-{BOT_NAME}.json"
@@ -202,11 +206,28 @@ def remove_worktree(project_dir: str, thread_id: str) -> None:
 # Claude Code runner
 # ---------------------------------------------------------------------------
 
+async def _kill_proc(proc: asyncio.subprocess.Process) -> None:
+    if proc.returncode is not None:
+        return
+    proc.kill()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=5)
+    except asyncio.TimeoutError:
+        pass
+
+
 async def run_claude_code(work_dir: str, prompt: str, session_id: str | None) -> dict:
+    """Run `claude` CLI in stream-json mode with idle + hard timeouts.
+
+    Idle timeout kicks in only when nothing is emitted for CLAUDE_IDLE_TIMEOUT
+    seconds, so long-running tasks don't fail as long as Claude keeps making
+    progress. CLAUDE_HARD_TIMEOUT is an absolute cap to prevent runaway runs.
+    """
     args = [
         "claude",
         "-p", prompt,
-        "--output-format", "json",
+        "--output-format", "stream-json",
+        "--verbose",
         "--max-turns", str(CLAUDE_MAX_TURNS),
         "--permission-mode", "bypassPermissions",
     ]
@@ -224,28 +245,83 @@ async def run_claude_code(work_dir: str, prompt: str, session_id: str | None) ->
         stderr=asyncio.subprocess.PIPE,
     )
 
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=CLAUDE_TIMEOUT)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.communicate()
-        raise RuntimeError(f"Claude Code timed out ({CLAUDE_TIMEOUT}s)")
+    loop = asyncio.get_event_loop()
+    started_at = loop.time()
+    last_activity = started_at
+    result_event: dict | None = None
+    stderr_buf = bytearray()
 
-    if proc.returncode == 0:
-        try:
-            data = json.loads(stdout.decode())
-            return {
-                "text": data.get("result") or "(no response)",
-                "sessionId": data.get("session_id"),
-                "cost": data.get("total_cost_usd", 0),
-            }
-        except json.JSONDecodeError:
-            return {"text": stdout.decode().strip() or "(no response)", "sessionId": None, "cost": 0}
-    else:
-        err = stderr.decode()[:300]
-        out = stdout.decode()[:200]
-        print(f"[claude] exit={proc.returncode} stderr={err} stdout={out}", file=sys.stderr)
-        raise RuntimeError(f"Claude Code exited {proc.returncode}: {err or out}")
+    async def drain_stderr() -> None:
+        while True:
+            chunk = await proc.stderr.read(4096)
+            if not chunk:
+                return
+            stderr_buf.extend(chunk)
+
+    stderr_task = asyncio.create_task(drain_stderr())
+
+    try:
+        while True:
+            now = loop.time()
+            idle_budget = CLAUDE_IDLE_TIMEOUT - (now - last_activity)
+            hard_budget = CLAUDE_HARD_TIMEOUT - (now - started_at)
+            budget = min(idle_budget, hard_budget)
+
+            if budget <= 0:
+                await _kill_proc(proc)
+                reason = (
+                    f"no output for {CLAUDE_IDLE_TIMEOUT}s"
+                    if idle_budget <= hard_budget
+                    else f"total runtime exceeded {CLAUDE_HARD_TIMEOUT}s"
+                )
+                raise RuntimeError(f"Claude Code timed out ({reason})")
+
+            try:
+                line = await asyncio.wait_for(proc.stdout.readline(), timeout=budget)
+            except asyncio.TimeoutError:
+                continue
+
+            if not line:
+                break
+
+            last_activity = loop.time()
+
+            try:
+                event = json.loads(line.decode())
+            except json.JSONDecodeError:
+                continue
+
+            if event.get("type") == "result":
+                result_event = event
+    except BaseException:
+        await _kill_proc(proc)
+        raise
+    finally:
+        if not stderr_task.done():
+            stderr_task.cancel()
+            try:
+                await stderr_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=5)
+    except asyncio.TimeoutError:
+        await _kill_proc(proc)
+
+    if proc.returncode != 0:
+        err = stderr_buf.decode(errors="replace")[:300]
+        print(f"[claude] exit={proc.returncode} stderr={err}", file=sys.stderr)
+        raise RuntimeError(f"Claude Code exited {proc.returncode}: {err or '(no stderr)'}")
+
+    if result_event is None:
+        raise RuntimeError("Claude Code did not emit a result event")
+
+    return {
+        "text": result_event.get("result") or "(no response)",
+        "sessionId": result_event.get("session_id"),
+        "cost": result_event.get("total_cost_usd", 0),
+    }
 
 
 # ---------------------------------------------------------------------------
