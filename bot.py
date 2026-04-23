@@ -21,6 +21,11 @@ import discord
 from discord import ChannelType, Intents
 
 from mention_helpers import is_bot_addressed, strip_mentions
+from attachments import (
+    chunk_for_messages,
+    filter_sendable,
+    format_inbox_for_prompt,
+)
 
 # ---------------------------------------------------------------------------
 # Boot: resolve bot name from argv
@@ -260,6 +265,69 @@ async def send_long_message(channel: discord.abc.Messageable, text: str) -> None
         remaining = remaining[split_at:]
 
 
+async def save_inbox_attachments(
+    message: discord.Message, work_dir: str
+) -> list[Path]:
+    """Download message.attachments to work_dir/_inbox/. Returns saved paths."""
+    if not message.attachments:
+        return []
+    inbox = Path(work_dir) / "_inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    saved: list[Path] = []
+    for att in message.attachments:
+        target = inbox / att.filename
+        try:
+            await att.save(target)
+            saved.append(target)
+        except Exception as e:
+            print(f"[inbox] failed to save {att.filename}: {e}", file=sys.stderr)
+    return saved
+
+
+async def send_outbox_files(
+    channel: discord.abc.Messageable, work_dir: str
+) -> int:
+    """Send every file under work_dir/_outbox/ back to the channel. Files are
+    removed once successfully uploaded. Returns count sent."""
+    outbox = Path(work_dir) / "_outbox"
+    if not outbox.is_dir():
+        return 0
+    files = sorted(p for p in outbox.rglob("*") if p.is_file())
+    if not files:
+        return 0
+
+    sendable, rejected = filter_sendable(files)
+    for path, reason in rejected:
+        await channel.send(f"⚠️ `{path.name}` is too large to attach ({reason}).")
+
+    sent_count = 0
+    for batch in chunk_for_messages(sendable):
+        discord_files = [discord.File(str(p), filename=p.name) for p in batch]
+        await channel.send(files=discord_files)
+        for p in batch:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        sent_count += len(batch)
+    return sent_count
+
+
+def build_prompt_with_inbox(user_text: str, saved: list[Path]) -> str:
+    """Glue inbox listing onto the user prompt. The _outbox/ convention is
+    declared once per session to keep Claude aware of where to write output."""
+    preamble = (
+        "[Discord 連携ルール] 出力ファイル (PDF/画像/CSV 等) は _outbox/ 以下に "
+        "書き出してね。ユーザーに自動で添付されるよ。"
+    )
+    inbox = format_inbox_for_prompt(saved)
+    parts = [preamble]
+    if inbox:
+        parts.append(inbox)
+    parts.append(user_text)
+    return "\n\n".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Notification
 # ---------------------------------------------------------------------------
@@ -414,7 +482,7 @@ async def handle_new_session(message: discord.Message, text: str) -> None:
     else:
         thread = await message.create_thread(name=thread_name, auto_archive_duration=1440)
 
-    await _start_session(thread, text, thread_name)
+    await _start_session(thread, text, thread_name, trigger_message=message)
 
 
 # ---------------------------------------------------------------------------
@@ -423,10 +491,12 @@ async def handle_new_session(message: discord.Message, text: str) -> None:
 
 async def handle_forum_new_session(message: discord.Message, text: str) -> None:
     thread = message.channel  # Already a thread (forum post)
-    await _start_session(thread, text, thread.name)
+    await _start_session(thread, text, thread.name, trigger_message=message)
 
 
-async def _start_session(thread, text: str, thread_name: str) -> None:
+async def _start_session(
+    thread, text: str, thread_name: str, trigger_message: discord.Message | None = None
+) -> None:
     # Reserve session immediately to prevent duplicate processing
     sessions = load_sessions()
     if str(thread.id) in sessions:
@@ -452,11 +522,16 @@ async def _start_session(thread, text: str, thread_name: str) -> None:
     worktree_path = create_worktree(PROJECT_DIR, str(thread.id))
     work_dir = worktree_path or PROJECT_DIR
 
+    saved_inbox: list[Path] = []
+    if trigger_message is not None:
+        saved_inbox = await save_inbox_attachments(trigger_message, work_dir)
+    prompt = build_prompt_with_inbox(text, saved_inbox)
+
     typing = TypingLoop(thread)
     typing.start()
 
     try:
-        result = await run_claude_code(work_dir, text, None)
+        result = await run_claude_code(work_dir, prompt, None)
         typing.stop()
 
         sessions = load_sessions()
@@ -473,10 +548,12 @@ async def _start_session(thread, text: str, thread_name: str) -> None:
         save_sessions(sessions)
 
         await send_long_message(thread, result["text"])
+        sent = await send_outbox_files(thread, work_dir)
 
         cost_str = f" (${result['cost']:.4f})" if result.get("cost") else ""
-        print(f"[new] {thread_name} -> {len(result['text'])} chars{cost_str}")
-        await notify(f"✅ [{PROJECT_DISPLAY}] New: **{thread_name}**{cost_str}")
+        file_str = f" +{sent}files" if sent else ""
+        print(f"[new] {thread_name} -> {len(result['text'])} chars{cost_str}{file_str}")
+        await notify(f"✅ [{PROJECT_DISPLAY}] New: **{thread_name}**{cost_str}{file_str}")
 
     except Exception as e:
         typing.stop()
@@ -500,13 +577,16 @@ async def handle_thread_message(message: discord.Message) -> None:
 
     work_dir = session.get("workDir", session["projectDir"])
 
+    saved_inbox = await save_inbox_attachments(message, work_dir)
+    prompt = build_prompt_with_inbox(message.content.strip(), saved_inbox)
+
     typing = TypingLoop(message.channel)
     typing.start()
 
     try:
         result = await run_claude_code(
             work_dir,
-            message.content.strip(),
+            prompt,
             session["sessionId"],
         )
         typing.stop()
@@ -518,9 +598,11 @@ async def handle_thread_message(message: discord.Message) -> None:
         save_sessions(sessions)
 
         await send_long_message(message.channel, result["text"])
+        sent = await send_outbox_files(message.channel, work_dir)
 
         cost_str = f" (${result['cost']:.4f})" if result.get("cost") else ""
-        print(f"[cont] {session['threadName']} msg#{session['messageCount']}{cost_str}")
+        file_str = f" +{sent}files" if sent else ""
+        print(f"[cont] {session['threadName']} msg#{session['messageCount']}{cost_str}{file_str}")
 
     except Exception as e:
         typing.stop()

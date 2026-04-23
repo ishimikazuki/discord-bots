@@ -9,6 +9,7 @@
     <rule>bot は kazuki-macmini の GUI セッション LaunchAgent として動かす（login keychain access が必須）</rule>
     <rule>#一般 でロール/ユーザーメンション → bot 専用フォーラムに新スレッドを自動作成</rule>
     <rule>plist は generate-plists.sh が config.json から動的に出力する（bot 追加 → 再実行で反映）</rule>
+    <rule>ファイル受信は worktree の _inbox/ に自動保存、送信は _outbox/ を自動走査（≤10MB, ≤10files/msg）</rule>
   </rules>
 
   <current_work>PLANS.md を参照</current_work>
@@ -17,6 +18,7 @@
     <decision date="2026-04-22">ssh nohup 起動は keychain ロックで claude OAuth 読めず不可。LaunchAgent + gui/$UID 必須</decision>
     <decision date="2026-04-22">bot 毎に専用フォーラム（案A）。共通ロールだと全 bot が一斉反応するため却下</decision>
     <decision date="2026-04-22">plist 命名を com.kazuki-macmini.discord-bot-* に変更し旧 com.akimare.* と衝突回避</decision>
+    <decision date="2026-04-23">ファイル転送は _inbox / _outbox 規約（案A 最小実装）。10MB 超は警告のみ、必要になれば案B (Drive) に拡張</decision>
   </decisions>
 
   <logs>PROJECT_LOG/INDEX.md</logs>
