@@ -20,6 +20,13 @@
       "dir": "~",
       "emoji": "🔧",
       "control_channel_id": 1496067525727752403
+    },
+    "yumekano-coe": {
+      "name": "yumekano-coe",
+      "token_keychain_account": "yumekano-coe-bot-token",
+      "dir": "~/yumekano-agent-CoE",
+      "emoji": "🌙",
+      "control_channel_id": null
     }
   },
   "notify_channel_id": 1496067529364344933,
