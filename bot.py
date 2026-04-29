@@ -249,6 +249,13 @@ async def run_claude_code(work_dir: str, prompt: str, session_id: str | None) ->
     home = Path.home()
     env = {**os.environ, "PATH": f"{home}/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"}
 
+    claude_path = shutil.which("claude", path=env["PATH"])
+    print(
+        f"[claude] launching cwd={work_dir} claude={claude_path} "
+        f"resume={session_id} max_turns={CLAUDE_MAX_TURNS}",
+        file=sys.stderr,
+    )
+
     # stream-json events for tool_use / tool_result can blow past the 64 KiB
     # default buffer; raise it so readline() doesn't die with
     # "Separator is found, but chunk is longer than limit".
@@ -331,8 +338,14 @@ async def run_claude_code(work_dir: str, prompt: str, session_id: str | None) ->
         pass
 
     if proc.returncode != 0:
-        err = stderr_buf.decode(errors="replace")[:300]
-        print(f"[claude] exit={proc.returncode} stderr={err}", file=sys.stderr)
+        err = stderr_buf.decode(errors="replace")[:1000]
+        print(
+            f"[claude] exit={proc.returncode} stderr_bytes={len(stderr_buf)} "
+            f"result_event={result_event is not None} "
+            f"PATH={env.get('PATH', '')[:120]} HOME={env.get('HOME', '')} "
+            f"cwd={work_dir} args={args} stderr={err!r}",
+            file=sys.stderr,
+        )
         raise RuntimeError(f"Claude Code exited {proc.returncode}: {err or '(no stderr)'}")
 
     if result_event is None:
