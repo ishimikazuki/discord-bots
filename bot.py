@@ -256,6 +256,7 @@ async def run_claude_code(work_dir: str, prompt: str, session_id: str | None) ->
         *args,
         cwd=work_dir,
         env=env,
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         limit=10 * 1024 * 1024,
@@ -312,18 +313,22 @@ async def run_claude_code(work_dir: str, prompt: str, session_id: str | None) ->
     except BaseException:
         await _kill_proc(proc)
         raise
-    finally:
-        if not stderr_task.done():
-            stderr_task.cancel()
-            try:
-                await stderr_task
-            except (asyncio.CancelledError, Exception):
-                pass
 
     try:
         await asyncio.wait_for(proc.wait(), timeout=5)
     except asyncio.TimeoutError:
         await _kill_proc(proc)
+
+    try:
+        await asyncio.wait_for(stderr_task, timeout=2)
+    except asyncio.TimeoutError:
+        stderr_task.cancel()
+        try:
+            await stderr_task
+        except (asyncio.CancelledError, Exception):
+            pass
+    except (asyncio.CancelledError, Exception):
+        pass
 
     if proc.returncode != 0:
         err = stderr_buf.decode(errors="replace")[:300]
