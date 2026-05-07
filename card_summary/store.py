@@ -104,3 +104,109 @@ def upsert_transactions(db_path: Path, txs: list[Transaction]) -> int:
         )
         after = c.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
         return after - before
+
+
+# fetch_checkpoint -----------------------------------------------------------
+def get_fetch_checkpoint(db_path: Path, source: str) -> str | None:
+    with _conn(db_path) as c:
+        row = c.execute(
+            "SELECT last_fetch_at FROM fetch_checkpoint WHERE source = ?", (source,)
+        ).fetchone()
+        return row["last_fetch_at"] if row else None
+
+def set_fetch_checkpoint(db_path: Path, source: str, when: str) -> None:
+    with _conn(db_path) as c:
+        c.execute(
+            """
+            INSERT INTO fetch_checkpoint (source, last_fetch_at) VALUES (?, ?)
+            ON CONFLICT(source) DO UPDATE SET last_fetch_at = excluded.last_fetch_at
+            """,
+            (source, when),
+        )
+
+# summary_state --------------------------------------------------------------
+def get_summary_state(db_path: Path, slot: str) -> dict | None:
+    with _conn(db_path) as c:
+        row = c.execute("SELECT * FROM summary_state WHERE slot = ?", (slot,)).fetchone()
+        return dict(row) if row else None
+
+def set_summary_state(
+    db_path: Path,
+    slot: str,
+    *,
+    last_posted_at: str,
+    last_total: int,
+    last_breakdown_hash: str,
+    last_max_tx_id: int,
+    last_alert_hash: str,
+    last_thread_id: str,
+) -> None:
+    with _conn(db_path) as c:
+        c.execute(
+            """
+            INSERT INTO summary_state
+              (slot, last_posted_at, last_total, last_breakdown_hash,
+               last_max_tx_id, last_alert_hash, last_thread_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(slot) DO UPDATE SET
+              last_posted_at = excluded.last_posted_at,
+              last_total = excluded.last_total,
+              last_breakdown_hash = excluded.last_breakdown_hash,
+              last_max_tx_id = excluded.last_max_tx_id,
+              last_alert_hash = excluded.last_alert_hash,
+              last_thread_id = excluded.last_thread_id
+            """,
+            (slot, last_posted_at, last_total, last_breakdown_hash,
+             last_max_tx_id, last_alert_hash, last_thread_id),
+        )
+
+# monthly_close --------------------------------------------------------------
+def upsert_monthly_close(db_path: Path, year_month: str, confirmed_amount: int, fetched_at: str) -> None:
+    with _conn(db_path) as c:
+        c.execute(
+            """
+            INSERT INTO monthly_close (year_month, confirmed_amount, fetched_at) VALUES (?, ?, ?)
+            ON CONFLICT(year_month) DO UPDATE SET
+              confirmed_amount = excluded.confirmed_amount,
+              fetched_at = excluded.fetched_at
+            """,
+            (year_month, confirmed_amount, fetched_at),
+        )
+
+def get_monthly_close(db_path: Path, year_month: str) -> int | None:
+    with _conn(db_path) as c:
+        row = c.execute(
+            "SELECT confirmed_amount FROM monthly_close WHERE year_month = ?", (year_month,)
+        ).fetchone()
+        return row["confirmed_amount"] if row else None
+
+# category_rules -------------------------------------------------------------
+def seed_category_rules(db_path: Path, mapping: dict[str, str]) -> None:
+    """Bulk insert seed rules. Won't overwrite existing rules."""
+    with _conn(db_path) as c:
+        c.executemany(
+            "INSERT OR IGNORE INTO category_rules (pattern, category, source) VALUES (?, ?, 'seed')",
+            [(k.upper(), v) for k, v in mapping.items()],
+        )
+
+def set_category_rule(db_path: Path, pattern: str, category: str, *, source: str) -> None:
+    with _conn(db_path) as c:
+        c.execute(
+            """
+            INSERT INTO category_rules (pattern, category, source) VALUES (?, ?, ?)
+            ON CONFLICT(pattern) DO UPDATE SET category = excluded.category, source = excluded.source
+            """,
+            (pattern.upper(), category, source),
+        )
+
+def get_category_for(db_path: Path, merchant: str) -> str | None:
+    """Return matching category by substring match (case-insensitive)."""
+    if not merchant:
+        return None
+    upper = merchant.upper()
+    with _conn(db_path) as c:
+        rows = c.execute("SELECT pattern, category FROM category_rules").fetchall()
+        for row in rows:
+            if row["pattern"] in upper:
+                return row["category"]
+    return None
