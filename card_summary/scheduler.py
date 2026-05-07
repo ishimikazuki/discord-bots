@@ -2,7 +2,7 @@
 from __future__ import annotations
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Awaitable, Callable
 from card_summary.config import (
@@ -88,3 +88,54 @@ async def run_slot(
         last_thread_id=str(thread.id),
     )
     log.info("[%s] posted thread_id=%s total=%d", slot, thread.id, report.month_total)
+
+
+def _next_slot_to_run() -> tuple[str, datetime]:
+    """Return (slot_name, next_run_datetime) — the soonest upcoming slot."""
+    now = datetime.now()
+    today_candidates = [
+        (slot, now.replace(hour=hour, minute=0, second=0, microsecond=0))
+        for slot, hour in SLOTS.items()
+    ]
+    future = [(s, dt) for s, dt in today_candidates if dt > now]
+    if future:
+        future.sort(key=lambda kv: kv[1])
+        return future[0]
+    # All today's slots elapsed → first slot of tomorrow
+    tomorrow = now + timedelta(days=1)
+    first_slot = min(SLOTS, key=SLOTS.get)
+    return (first_slot, tomorrow.replace(hour=SLOTS[first_slot], minute=0, second=0, microsecond=0))
+
+
+def _seconds_until(target: datetime) -> float:
+    return max(0.0, (target - datetime.now()).total_seconds())
+
+
+async def start_scheduler(
+    *,
+    fetch_new: FetchFn,
+    llm_fn: LlmFn,
+    post_to_forum: PostFn,
+    register_session: RegisterFn,
+    db_path: Path = DB_PATH,
+) -> None:
+    """Long-running daily loop. Sleeps until next slot, runs it, repeats."""
+    log.info("scheduler started")
+    while True:
+        slot, next_dt = _next_slot_to_run()
+        delay = _seconds_until(next_dt)
+        log.info("scheduler: next slot=%s in %.0fs (%s)", slot, delay, next_dt.isoformat())
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            log.info("scheduler cancelled")
+            return
+        try:
+            await run_slot(
+                slot=slot, db_path=db_path,
+                fetch_new=fetch_new, llm_fn=llm_fn,
+                post_to_forum=post_to_forum, register_session=register_session,
+            )
+        except Exception:
+            log.exception("run_slot crashed for slot=%s", slot)
+            await asyncio.sleep(60)  # avoid tight retry loop on persistent failure
