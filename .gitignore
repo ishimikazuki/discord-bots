@@ -7,3 +7,10 @@ sessions*.json
 __pycache__/
 *.pyc
 .worktrees/
+
+# card_summary
+data/card.sqlite3
+data/card.sqlite3-journal
+data/gmail_token.json
+data/gmail_credentials.json
+data/card_summary/contexts/
