@@ -1,6 +1,8 @@
 """SQLite persistence layer for card_summary."""
 from __future__ import annotations
 import sqlite3
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 SCHEMA = """
@@ -61,3 +63,44 @@ def open_conn(db_path: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+@dataclass(frozen=True)
+class Transaction:
+    occurred_at: str   # ISO8601
+    merchant: str
+    amount: int        # 円
+    category: str | None
+    source: str        # 'gmail' | 'epos_net'
+    source_id: str
+
+
+@contextmanager
+def _conn(db_path: Path):
+    c = open_conn(db_path)
+    try:
+        yield c
+        c.commit()
+    except Exception:
+        c.rollback()
+        raise
+    finally:
+        c.close()
+
+
+def upsert_transactions(db_path: Path, txs: list[Transaction]) -> int:
+    """INSERT OR IGNORE rows. Returns number of new rows inserted."""
+    if not txs:
+        return 0
+    with _conn(db_path) as c:
+        before = c.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+        c.executemany(
+            """
+            INSERT OR IGNORE INTO transactions
+              (occurred_at, merchant, amount, category, source, source_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [(t.occurred_at, t.merchant, t.amount, t.category, t.source, t.source_id) for t in txs],
+        )
+        after = c.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+        return after - before
