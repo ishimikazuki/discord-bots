@@ -1,5 +1,7 @@
 """Compute monthly aggregations, highlights, and alerts."""
 from __future__ import annotations
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime, date, timedelta
 from pathlib import Path
@@ -166,3 +168,53 @@ def detect_alerts(db_path: Path, today: datetime) -> list[Alert]:
             ))
 
     return alerts
+
+
+@dataclass(frozen=True)
+class SummaryReport:
+    today: datetime
+    year_month: str
+    month_total: int
+    prev_month_same_day: int
+    category_breakdown: dict[str, int]
+    highlight: dict | None
+    alerts: list[Alert]
+    max_tx_id: int
+    breakdown_hash: str
+    alert_hash: str
+
+
+def _sha256(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+def compute_report(db_path: Path, today: datetime, since_max_id: int) -> SummaryReport:
+    ym = f"{today.year:04d}-{today.month:02d}"
+    breakdown = category_breakdown(db_path, ym)
+    alerts = detect_alerts(db_path, today)
+    breakdown_json = json.dumps(breakdown, sort_keys=True, ensure_ascii=False)
+    alerts_json = json.dumps([(a.kind, a.message) for a in alerts], ensure_ascii=False)
+    return SummaryReport(
+        today=today,
+        year_month=ym,
+        month_total=month_total(db_path, ym),
+        prev_month_same_day=prev_month_same_day_total(db_path, today),
+        category_breakdown=breakdown,
+        highlight=highlight_tx(db_path, ym, since_max_id),
+        alerts=alerts,
+        max_tx_id=max_tx_id(db_path, ym),
+        breakdown_hash=_sha256(breakdown_json),
+        alert_hash=_sha256(alerts_json),
+    )
+
+
+def has_changed(prev: dict | None, report: SummaryReport) -> bool:
+    """Returns True if any of the 4 tracked values differ from prev."""
+    if prev is None:
+        return True
+    return (
+        prev["last_total"] != report.month_total
+        or prev["last_breakdown_hash"] != report.breakdown_hash
+        or prev["last_max_tx_id"] != report.max_tx_id
+        or prev["last_alert_hash"] != report.alert_hash
+    )
