@@ -28,6 +28,12 @@ from attachments import (
     filter_sendable,
     format_inbox_for_prompt,
 )
+from claude_errors import describe_claude_failure
+from discord_test_auth import (
+    is_allowed_bot_test_message,
+    parse_id_set,
+    strip_test_nonce,
+)
 
 # launchd captures stderr into <bot>.err.log. Route discord.py internals there
 # so gateway reconnect / rate-limit / auth failures are visible post-mortem.
@@ -116,6 +122,8 @@ CLAUDE_IDLE_TIMEOUT = CONFIG.get(
 )
 CLAUDE_HARD_TIMEOUT = CONFIG.get("claude_hard_timeout_seconds", 3600)
 CLAUDE_MAX_TURNS = CONFIG.get("claude_max_turns", 25)
+TEST_BOT_AUTHOR_IDS = parse_id_set(os.environ.get("DISCORD_BOT_TEST_AUTHOR_IDS"))
+TEST_MESSAGE_NONCE = os.environ.get("DISCORD_BOT_TEST_NONCE")
 
 SESSIONS_FILE = Path(__file__).parent / f"sessions-{BOT_NAME}.json"
 
@@ -249,6 +257,8 @@ async def run_claude_code(work_dir: str, prompt: str, session_id: str | None) ->
     home = Path.home()
     env = {**os.environ, "PATH": f"{home}/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"}
 
+    last_stdout_lines: list[str] = []
+
     # stream-json events for tool_use / tool_result can blow past the 64 KiB
     # default buffer; raise it so readline() doesn't die with
     # "Separator is found, but chunk is longer than limit".
@@ -302,6 +312,11 @@ async def run_claude_code(work_dir: str, prompt: str, session_id: str | None) ->
 
             last_activity = loop.time()
 
+            decoded = line.decode(errors="replace").rstrip()
+            last_stdout_lines.append(decoded[:500])
+            if len(last_stdout_lines) > 5:
+                last_stdout_lines.pop(0)
+
             try:
                 event = json.loads(line.decode())
             except json.JSONDecodeError:
@@ -326,9 +341,22 @@ async def run_claude_code(work_dir: str, prompt: str, session_id: str | None) ->
         await _kill_proc(proc)
 
     if proc.returncode != 0:
-        err = stderr_buf.decode(errors="replace")[:300]
-        print(f"[claude] exit={proc.returncode} stderr={err}", file=sys.stderr)
-        raise RuntimeError(f"Claude Code exited {proc.returncode}: {err or '(no stderr)'}")
+        err = stderr_buf.decode(errors="replace")[:500]
+        failure = describe_claude_failure(proc.returncode, err, result_event)
+        tail = " | ".join(last_stdout_lines) or "(no stdout)"
+        sid = session_id or "(new)"
+        print(
+            f"[claude] exit={proc.returncode} session={sid} cwd={work_dir} "
+            f"failure={failure!r} stderr={err!r} last_stdout={tail!r}",
+            file=sys.stderr,
+        )
+        if session_id and proc.returncode == 1 and not err and not result_event:
+            print(
+                f"[claude] retrying without --resume after silent exit (session={sid})",
+                file=sys.stderr,
+            )
+            return await run_claude_code(work_dir, prompt, None)
+        raise RuntimeError(failure)
 
     if result_event is None:
         raise RuntimeError("Claude Code did not emit a result event")
@@ -406,18 +434,11 @@ async def send_outbox_files(
 
 
 def build_prompt_with_inbox(user_text: str, saved: list[Path]) -> str:
-    """Glue inbox listing onto the user prompt. The _outbox/ convention is
-    declared once per session to keep Claude aware of where to write output."""
-    preamble = (
-        "[Discord 連携ルール] 出力ファイル (PDF/画像/CSV 等) は _outbox/ 以下に "
-        "書き出してね。ユーザーに自動で添付されるよ。"
-    )
-    inbox = format_inbox_for_prompt(saved)
-    parts = [preamble]
-    if inbox:
-        parts.append(inbox)
-    parts.append(user_text)
-    return "\n\n".join(parts)
+    """Pass the user prompt through unchanged. The _inbox/_outbox convention
+    is documented in ~/.claude/CLAUDE.md so we don't pollute each prompt with
+    a preamble. `saved` is kept in the signature for callers but no longer
+    surfaced — Claude will `ls _inbox/` on demand."""
+    return user_text
 
 
 # ---------------------------------------------------------------------------
@@ -782,8 +803,19 @@ async def on_message(message: discord.Message):
 
 
 async def _handle_message(message: discord.Message):
-    if message.author.bot:
+    is_test_bot_message = is_allowed_bot_test_message(
+        author_is_bot=message.author.bot,
+        author_id=message.author.id,
+        content=message.content or "",
+        nonce=TEST_MESSAGE_NONCE,
+        allowed_author_ids=TEST_BOT_AUTHOR_IDS,
+    )
+    if message.author.bot and not is_test_bot_message:
         return
+    message_content = strip_test_nonce(message.content or "", TEST_MESSAGE_NONCE)
+    if is_test_bot_message:
+        print(f"[test] accepted bot-authored test message from {message.author.id}")
+
     if message.id in _processed_messages:
         return
     _processed_messages.add(message.id)
@@ -809,7 +841,7 @@ async def _handle_message(message: discord.Message):
 
     if is_guild_text:
         content = strip_mentions(
-            message.content, {client.user.id}, my_role_ids
+            message_content, {client.user.id}, my_role_ids
         )
         if not content:
             content = "hello"
@@ -850,9 +882,9 @@ async def _handle_message(message: discord.Message):
             if str(message.channel.id) not in sessions:
                 return  # Not our thread, ignore silently
 
-        content = strip_mentions(message.content, {client.user.id}, my_role_ids)
+        content = strip_mentions(message_content, {client.user.id}, my_role_ids)
         if not content:
-            content = message.content.strip()
+            content = message_content.strip()
         cmd = parse_command(content)
         if cmd["type"] == "close":
             await handle_close(message.channel)

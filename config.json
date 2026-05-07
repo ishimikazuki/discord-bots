@@ -14,12 +14,12 @@
       "emoji": "📚",
       "control_channel_id": 1496067522120908951
     },
-    "reserved": {
-      "name": "reserved",
-      "token_keychain_account": "reserved-bot-token",
-      "dir": "~",
-      "emoji": "🔧",
-      "control_channel_id": 1496067525727752403
+    "kanojo": {
+      "name": "kanojo",
+      "token_keychain_account": "kanojo-bot-token",
+      "dir": "~/kanojo",
+      "emoji": "💕",
+      "control_channel_id": 1497151379393876020
     },
     "yumekano-coe": {
       "name": "yumekano-coe",
@@ -35,5 +35,5 @@
   "worktree_enabled": true,
   "claude_idle_timeout_seconds": 900,
   "claude_hard_timeout_seconds": 3600,
-  "claude_max_turns": 25
+  "claude_max_turns": 50
 }
