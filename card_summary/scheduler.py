@@ -139,3 +139,54 @@ async def start_scheduler(
         except Exception:
             log.exception("run_slot crashed for slot=%s", slot)
             await asyncio.sleep(60)  # avoid tight retry loop on persistent failure
+
+import json as _json
+
+# Discord glue for bot.py ----------------------------------------------------
+async def post_to_kanojo_forum(client, forum_channel_id: int, thread_name: str, body: str):
+    """Create a thread in the kanojo forum and return it."""
+    import discord
+    forum = client.get_channel(forum_channel_id)
+    if not isinstance(forum, discord.ForumChannel):
+        raise RuntimeError(f"channel {forum_channel_id} is not a ForumChannel: {type(forum)}")
+    created = await forum.create_thread(
+        name=thread_name,
+        content=body,
+        auto_archive_duration=1440,
+    )
+    return created.thread
+
+async def register_kanojo_session(
+    sessions_path: Path,
+    thread,
+    slot: str,
+    summary_text: str,
+    project_dir: str,
+) -> None:
+    """Pre-populate sessions.json so bot.py's handle_thread_message picks up the thread.
+
+    Also write the summary to data/card_summary/contexts/{thread_id}.txt so the
+    first Claude call gets the summary as background context (since the user's
+    question alone won't include it).
+    """
+    CONTEXT_DIR.mkdir(parents=True, exist_ok=True)
+    ctx_path = CONTEXT_DIR / f"{thread.id}.txt"
+    ctx_path.write_text(summary_text, encoding="utf-8")
+
+    # Read–modify–write on sessions.json (single-process, no lock needed)
+    sessions = {}
+    if sessions_path.exists():
+        sessions = _json.loads(sessions_path.read_text())
+    sessions[str(thread.id)] = {
+        "sessionId": None,
+        "projectDir": project_dir,
+        "workDir": project_dir,
+        "worktreePath": None,
+        "threadName": thread.name,
+        "createdAt": datetime.now().isoformat(),
+        "lastUsed": datetime.now().isoformat(),
+        "messageCount": 0,
+        "kanojo_context_file": str(ctx_path),
+        "kanojo_slot": slot,
+    }
+    sessions_path.write_text(_json.dumps(sessions, indent=2, ensure_ascii=False) + "\n")

@@ -688,7 +688,23 @@ async def handle_thread_message(message: discord.Message) -> None:
     work_dir = session.get("workDir", session["projectDir"])
 
     saved_inbox = await save_inbox_attachments(message, work_dir)
-    prompt = build_prompt_with_inbox(message.content.strip(), saved_inbox)
+    user_text = message.content.strip()
+
+    # Kanojo bot: inject summary context on the first call of a kanojo-posted thread
+    ctx_file = session.get("kanojo_context_file")
+    if BOT_NAME == "kanojo" and session.get("sessionId") is None and ctx_file:
+        try:
+            ctx_text = Path(ctx_file).read_text(encoding="utf-8")
+            user_text = (
+                "<background>このスレッドは以下のサマリーを Bot が投稿して始まりました。"
+                "ユーザーの質問はこのサマリーに関するものとして回答してください。\n\n"
+                f"{ctx_text}\n</background>\n\n"
+                f"ユーザーの質問: {user_text}"
+            )
+        except Exception as e:
+            print(f"[kanojo] failed to read context file {ctx_file}: {e}", file=sys.stderr)
+
+    prompt = build_prompt_with_inbox(user_text, saved_inbox)
 
     typing = TypingLoop(message.channel)
     typing.start()
@@ -762,6 +778,40 @@ async def on_ready():
     print(f"[{BOT_NAME}] Project: {PROJECT_DISPLAY} -> {PROJECT_DIR}")
     print(f"[{BOT_NAME}] Control channel: {CONTROL_CHANNEL_ID or 'any (mention or DM)'}")
     print(f"[{BOT_NAME}] Auto-pull: {AUTO_PULL} | Worktree: {WORKTREE_ENABLED}")
+
+    if BOT_NAME == "kanojo":
+        from card_summary.scheduler import (
+            start_scheduler, post_to_kanojo_forum, register_kanojo_session,
+        )
+        from card_summary.config import KANOJO_FORUM_CHANNEL_ID
+
+        async def _fetch(since):
+            from card_summary.gmail_fetcher import authenticate, build_service, fetch_new_since
+            from card_summary.config import GMAIL_QUERY
+            creds = authenticate()
+            svc = build_service(creds)
+            return list(fetch_new_since(svc, GMAIL_QUERY, since))
+
+        def _llm(merchant: str) -> str:
+            # Initial implementation: bucket every unknown merchant as 'その他'.
+            # The categorizer caches the result so each unknown merchant only hits this once.
+            # Replace this stub with an Anthropic Haiku call when budget allows; the contract
+            # is `(merchant: str) -> category in CATEGORIES`. See spec §8 for the prompt.
+            return "その他"
+
+        async def _post(thread_name, body):
+            return await post_to_kanojo_forum(client, KANOJO_FORUM_CHANNEL_ID, thread_name, body)
+
+        async def _register(thread, slot, summary_text):
+            await register_kanojo_session(
+                SESSIONS_FILE, thread, slot, summary_text, PROJECT_DIR
+            )
+
+        asyncio.create_task(start_scheduler(
+            fetch_new=_fetch, llm_fn=_llm,
+            post_to_forum=_post, register_session=_register,
+        ))
+        print(f"[{BOT_NAME}] card_summary scheduler started")
 
 
 @client.event
