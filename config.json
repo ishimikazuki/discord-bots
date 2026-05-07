@@ -27,6 +27,13 @@
       "dir": "~/yumekano-agent-CoE",
       "emoji": "🌙",
       "control_channel_id": null
+    },
+    "kanojo": {
+      "name": "kanojo",
+      "token_keychain_account": "kanojo-bot-token",
+      "dir": "~/discord-bots",
+      "emoji": "💳",
+      "control_channel_id": null
     }
   },
   "notify_channel_id": 1496067529364344933,
