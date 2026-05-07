@@ -1,8 +1,12 @@
 """Compute monthly aggregations, highlights, and alerts."""
 from __future__ import annotations
-from datetime import datetime, date
+from dataclasses import dataclass
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from card_summary.store import open_conn
+from card_summary.config import (
+    ALERT_PACE_RATIO, ALERT_CATEGORY_RATIO, ALERT_SINGLE_TX_RATIO,
+)
 
 def month_total(db_path: Path, year_month: str) -> int:
     """Sum of amounts in the given YYYY-MM (inclusive)."""
@@ -60,3 +64,105 @@ def max_tx_id(db_path: Path, year_month: str) -> int:
             (year_month,),
         ).fetchone()
     return int(row["m"])
+
+
+@dataclass(frozen=True)
+class Alert:
+    kind: str       # 'pace' | 'category' | 'single'
+    message: str
+
+def _days_in_month(year: int, month: int) -> int:
+    if month == 12:
+        next_first = datetime(year + 1, 1, 1)
+    else:
+        next_first = datetime(year, month + 1, 1)
+    return (next_first - datetime(year, month, 1)).days
+
+def _prev_month_total(db_path: Path, today: datetime) -> int:
+    if today.month == 1:
+        prev_y, prev_m = today.year - 1, 12
+    else:
+        prev_y, prev_m = today.year, today.month - 1
+    return month_total(db_path, f"{prev_y:04d}-{prev_m:02d}")
+
+def _prev_month_same_day_category(db_path: Path, today: datetime) -> dict[str, int]:
+    if today.month == 1:
+        prev_y, prev_m = today.year - 1, 12
+    else:
+        prev_y, prev_m = today.year, today.month - 1
+    prev_ym = f"{prev_y:04d}-{prev_m:02d}"
+    upper_day = f"{today.day:02d}"
+    with open_conn(db_path) as c:
+        rows = c.execute(
+            "SELECT COALESCE(category, 'その他') AS cat, SUM(amount) AS s "
+            "FROM transactions WHERE substr(occurred_at, 1, 7) = ? AND substr(occurred_at, 9, 2) <= ? "
+            "GROUP BY cat",
+            (prev_ym, upper_day),
+        ).fetchall()
+    return {r["cat"]: int(r["s"]) for r in rows}
+
+def _last_30_days_amounts(db_path: Path, today: datetime) -> list[int]:
+    cutoff = (today - timedelta(days=30)).isoformat()
+    with open_conn(db_path) as c:
+        rows = c.execute(
+            "SELECT amount FROM transactions WHERE occurred_at >= ?",
+            (cutoff,),
+        ).fetchall()
+    return [int(r["amount"]) for r in rows]
+
+def _median(values: list[int]) -> float:
+    if not values:
+        return 0.0
+    s = sorted(values)
+    n = len(s)
+    if n % 2 == 1:
+        return float(s[n // 2])
+    return (s[n // 2 - 1] + s[n // 2]) / 2
+
+def detect_alerts(db_path: Path, today: datetime) -> list[Alert]:
+    """Return list of triggered alerts."""
+    alerts: list[Alert] = []
+    ym = f"{today.year:04d}-{today.month:02d}"
+    this_total = month_total(db_path, ym)
+    prev_total = _prev_month_total(db_path, today)
+
+    # 1. pace alert
+    if today.day > 0 and prev_total > 0:
+        days_in = _days_in_month(today.year, today.month)
+        projection = (this_total / today.day) * days_in
+        if projection > prev_total * ALERT_PACE_RATIO:
+            alerts.append(Alert(
+                "pace",
+                f"月ペース予測: ¥{int(projection):,} (前月 ¥{prev_total:,})",
+            ))
+
+    # 2. category alert
+    this_cat = category_breakdown(db_path, ym)
+    prev_cat = _prev_month_same_day_category(db_path, today)
+    for cat, this_amt in this_cat.items():
+        prev_amt = prev_cat.get(cat, 0)
+        if prev_amt > 0 and this_amt > prev_amt * ALERT_CATEGORY_RATIO:
+            ratio = this_amt / prev_amt * 100
+            alerts.append(Alert(
+                "category",
+                f"{cat} が前月同日比 +{int(ratio - 100)}% (今月ペース注意!)",
+            ))
+
+    # 3. single tx alert (largest tx today exceeds 5x of 30-day median)
+    recent = _last_30_days_amounts(db_path, today)
+    med = _median([a for a in recent if a > 0])
+    if med > 0:
+        with open_conn(db_path) as c:
+            row = c.execute(
+                "SELECT merchant, amount FROM transactions "
+                "WHERE substr(occurred_at, 1, 10) = ? "
+                "ORDER BY amount DESC LIMIT 1",
+                (today.date().isoformat(),),
+            ).fetchone()
+        if row and int(row["amount"]) > med * ALERT_SINGLE_TX_RATIO:
+            alerts.append(Alert(
+                "single",
+                f"⚡ 異常高額: {row['merchant']} ¥{int(row['amount']):,} (普段の{int(row['amount']/med)}倍)",
+            ))
+
+    return alerts
