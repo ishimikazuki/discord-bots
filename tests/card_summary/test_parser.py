@@ -14,3 +14,16 @@ def test_parse_normal(fixtures_dir):
 def test_parse_unknown_format_raises(fixtures_dir):
     with pytest.raises(ParseError):
         parse_epos_email("こんにちは、エポスです。利用情報なし。", message_id="msg-bad")
+
+def test_parse_cancel_negative_amount(fixtures_dir):
+    body = (fixtures_dir / "epos_cancel.txt").read_text(encoding="utf-8")
+    result = parse_epos_email(body, message_id="msg-002")
+    assert result.amount == -3200
+    assert result.merchant == "AMAZON.CO.JP"
+
+def test_parse_overseas(fixtures_dir):
+    body = (fixtures_dir / "epos_overseas.txt").read_text(encoding="utf-8")
+    result = parse_epos_email(body, message_id="msg-003")
+    assert result.amount == 3100
+    assert "OPENAI" in result.merchant
+    assert result.occurred_at.startswith("2026-05-06T22:45")
