@@ -43,3 +43,45 @@ def authenticate(
 def build_service(creds: Credentials) -> Any:
     """Return a googleapiclient gmail.users service."""
     return build("gmail", "v1", credentials=creds, cache_discovery=False)
+
+
+import base64
+from datetime import datetime
+from typing import Iterator
+
+
+def _decode_body(payload: dict) -> str:
+    """Recursively walk the payload tree to extract text/plain (or text/html as fallback)."""
+    mime = payload.get("mimeType", "")
+    if mime.startswith("text/"):
+        data = payload.get("body", {}).get("data")
+        if data:
+            return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
+    for part in payload.get("parts", []) or []:
+        text = _decode_body(part)
+        if text:
+            return text
+    return ""
+
+
+def _to_gmail_after(iso_str: str) -> str:
+    """Gmail search query takes after:YYYY/MM/DD form."""
+    dt = datetime.fromisoformat(iso_str)
+    return dt.strftime("%Y/%m/%d")
+
+
+def fetch_new_since(service, query: str, since: str | None) -> Iterator[tuple[str, str]]:
+    """Yield (message_id, body_text) for matching mails newer than `since` (ISO8601).
+
+    `service` is a googleapiclient gmail.users service (or a Mock with the same shape).
+    """
+    full_query = query
+    if since:
+        full_query = f"{query} after:{_to_gmail_after(since)}"
+    resp = service.users().messages().list(userId="me", q=full_query, maxResults=100).execute()
+    msgs = resp.get("messages") or []
+    for m in msgs:
+        msg_id = m["id"]
+        full = service.users().messages().get(userId="me", id=msg_id, format="full").execute()
+        body = _decode_body(full.get("payload") or {})
+        yield (msg_id, body)
