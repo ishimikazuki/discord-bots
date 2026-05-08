@@ -10,11 +10,14 @@
 - [x] Gmail OAuth セットアップ完了 (token 取得 + 実メール 10 件 parser 通過)
 - [x] エポスNet ログイン手動検証成功 (CVV 不要だった)
 - [x] 月別ご利用履歴照会で加盟店名込みの明細取得を確認
-- [ ] 設計ピボット: メール → エポスNet スクレイピング中心 ← 次やる
-- [ ] `card_summary/epos_scraper.py` 新規実装 (Playwright + keychain)
-- [ ] CATEGORY_SEED を実加盟店向けに更新
-- [ ] cookie 永続化 (CVV プロンプト回避)
-- [ ] macmini で Playwright + chromium インストール
+- [x] 設計ピボット: メール → エポスNet スクレイピング中心
+- [x] `card_summary/epos_scraper.py` 新規実装 (Playwright + keychain + cookie 永続化)
+- [x] CATEGORY_SEED を実加盟店向けに更新
+- [x] `get_category_for` を LENGTH 降順 lookup に修正 (具体的 pattern が generic を上書き)
+- [x] `tests/card_summary/test_epos_scraper.py` ユニット 10 件追加 (78 pass)
+- [ ] macmini で `pip install -r requirements.txt && playwright install chromium`
+- [ ] selector を実 DOM で verify (`headless=False` + 月選択挙動)
+- [ ] `card_summary/scheduler.py` に epos_scraper 統合 (1日1回 深夜呼び出し)
 - [ ] (optional) keychain へ kanojo bot token 移行 (.env から)
 
 ## 発見・予想外のこと
