@@ -11,7 +11,7 @@ DB_PATH = Path(__file__).resolve().parent.parent / "data" / "card.sqlite3"
 CONTEXT_DIR = Path(__file__).resolve().parent.parent / "data" / "card_summary" / "contexts"
 
 # Gmail -----------------------------------------------------------------------
-GMAIL_QUERY = "from:eposcard@eposcard.co.jp"
+GMAIL_QUERY = "from:info@01epos.jp subject:カードご利用のお知らせ"
 GMAIL_TOKEN_PATH = Path(__file__).resolve().parent.parent / "data" / "gmail_token.json"
 GMAIL_CREDENTIALS_PATH = Path(__file__).resolve().parent.parent / "data" / "gmail_credentials.json"
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]

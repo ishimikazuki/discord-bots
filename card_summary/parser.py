@@ -1,4 +1,4 @@
-"""Parse Epos card 'ご利用のお知らせ' email body into Transaction."""
+"""Parse Epos card 'カードご利用のお知らせ' email body into Transaction."""
 from __future__ import annotations
 import re
 from datetime import datetime
@@ -7,15 +7,16 @@ from card_summary.store import Transaction
 class ParseError(ValueError):
     pass
 
-# Patterns -------------------------------------------------------------------
-# Match: 【ご利用日時】2026年5月7日 14時23分
+# Patterns — actual Epos format (info@01epos.jp) uses full-width colon and no brackets
+# Match: ご利用日時：2026年5月7日14:23  /  also tolerate trailing whitespace
 _RE_DATETIME = re.compile(
-    r"【ご利用日時】\s*(\d{4})年(\d{1,2})月(\d{1,2})日\s*(\d{1,2})時(\d{1,2})分"
+    r"ご利用日時[：:]\s*(\d{4})年(\d{1,2})月(\d{1,2})日\s*(\d{1,2})[:時]\s*(\d{1,2})\s*分?"
 )
-# Match: 【ご利用店舗】SEVEN-ELEVEN/JP TOKYO
-_RE_MERCHANT = re.compile(r"【ご利用店舗】\s*(.+?)\s*$", re.MULTILINE)
-# Match: 【ご利用金額】850 円  /  1,234 円  /  -500 円 (cancellation)
-_RE_AMOUNT = re.compile(r"【ご利用金額】\s*(-?[\d,]+)\s*円")
+# Match: ご利用場所：国内加盟店ショッピング
+# Real Epos mails put a generic phrase here (no specific merchant name).
+_RE_MERCHANT = re.compile(r"ご利用(?:場所|店舗)[：:]\s*(.+?)\s*$", re.MULTILINE)
+# Match: ご利用金額：1,518円 / -3,200円
+_RE_AMOUNT = re.compile(r"ご利用金額[：:]\s*(-?[\d,]+)\s*円")
 
 def parse_epos_email(body: str, *, message_id: str) -> Transaction:
     """Parse one Epos notification mail body. Raises ParseError on unknown format."""
