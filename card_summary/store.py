@@ -200,12 +200,18 @@ def set_category_rule(db_path: Path, pattern: str, category: str, *, source: str
         )
 
 def get_category_for(db_path: Path, merchant: str) -> str | None:
-    """Return matching category by substring match (case-insensitive)."""
+    """Return matching category by substring match (case-insensitive).
+
+    Patterns are checked in descending length order so that more-specific
+    patterns ('AP/UBER') win over generic ones ('UBER') when both match.
+    """
     if not merchant:
         return None
     upper = merchant.upper()
     with _conn(db_path) as c:
-        rows = c.execute("SELECT pattern, category FROM category_rules").fetchall()
+        rows = c.execute(
+            "SELECT pattern, category FROM category_rules ORDER BY LENGTH(pattern) DESC, pattern"
+        ).fetchall()
         for row in rows:
             if row["pattern"] in upper:
                 return row["category"]
