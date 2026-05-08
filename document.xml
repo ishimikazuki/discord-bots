@@ -2,7 +2,7 @@
   <project_overview>
     <purpose>Discord bot 群からメンションで Claude Code を呼び、bot 毎のフォーラムでスレッド会話する</purpose>
     <tech_stack>Python 3.13 + discord.py 2.x / Claude Code CLI (OAuth) / macOS launchd LaunchAgent</tech_stack>
-    <phase>production on kazuki-macmini (remote mac mini), 4 bots: general / kb / reserved / yumekano-coe</phase>
+    <phase>production on kazuki-macmini (remote mac mini), 4 bots: general / kb / kanojo / yumekano-coe</phase>
   </project_overview>
 
   <rules>
@@ -19,6 +19,8 @@
     <decision date="2026-04-22">bot 毎に専用フォーラム（案A）。共通ロールだと全 bot が一斉反応するため却下</decision>
     <decision date="2026-04-22">plist 命名を com.kazuki-macmini.discord-bot-* に変更し旧 com.akimare.* と衝突回避</decision>
     <decision date="2026-04-23">ファイル転送は _inbox / _outbox 規約（案A 最小実装）。10MB 超は警告のみ、必要になれば案B (Drive) に拡張</decision>
+    <decision date="2026-05-07">kanojo bot を追加 (reserved を置換)。card_summary パッケージでカード利用サマリーを 1日3回 Discord 投稿、スレッド返信は context-file 注入で文脈保持</decision>
+    <decision date="2026-05-09">card_summary のデータ取得を Gmail から エポスNet スクレイピング中心に設計ピボット。メールは加盟店名取れず実用性低いため</decision>
   </decisions>
 
   <logs>PROJECT_LOG/INDEX.md</logs>
