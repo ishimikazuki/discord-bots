@@ -2,3 +2,5 @@
 
 - issue-0002-2026-04-23-file-transfer.md — Discord ファイル送受信（_inbox / _outbox 規約、案A 最小実装）
 - issue-0001-2026-04-22-role-mention-launchagent.md — ロールメンション対応 + LaunchAgent 常駐化（keychain access 解決）
+- issue-0004-2026-05-09-general-bot-duplicate-runs.md — General Bot の Claude Code 多重実行・重複返信を修正
+- issue-0005-2026-05-09-codex-migration.md — Discord Bot のAI実行基盤を Codex CLI へ移行

@@ -28,12 +28,13 @@ from attachments import (
     filter_sendable,
     format_inbox_for_prompt,
 )
-from claude_errors import describe_claude_failure
+from codex_errors import describe_codex_failure
 from discord_test_auth import (
     is_allowed_bot_test_message,
     parse_id_set,
     strip_test_nonce,
 )
+from singleton_lock import acquire_or_exit
 
 # launchd captures stderr into <bot>.err.log. Route discord.py internals there
 # so gateway reconnect / rate-limit / auth failures are visible post-mortem.
@@ -116,16 +117,27 @@ ALLOWED_USERS: list[int] = CONFIG.get("allowed_users", [])
 NOTIFY_CHANNEL_ID: int | None = CONFIG.get("notify_channel_id")
 AUTO_PULL = CONFIG.get("auto_pull_before_session", True)
 WORKTREE_ENABLED = CONFIG.get("worktree_enabled", True)
-CLAUDE_IDLE_TIMEOUT = CONFIG.get(
-    "claude_idle_timeout_seconds",
-    CONFIG.get("claude_timeout_seconds", 300),
-)
-CLAUDE_HARD_TIMEOUT = CONFIG.get("claude_hard_timeout_seconds", 3600)
-CLAUDE_MAX_TURNS = CONFIG.get("claude_max_turns", 25)
+CODEX_AGENT_NAME = "codex"
+CODEX_IDLE_TIMEOUT = CONFIG.get("codex_idle_timeout_seconds", 900)
+CODEX_HARD_TIMEOUT = CONFIG.get("codex_hard_timeout_seconds", 3600)
+CODEX_MAX_CONCURRENT_RUNS = CONFIG.get("codex_max_concurrent_runs", 1)
+CODEX_MODEL = CONFIG.get("codex_model")
+CODEX_APP_RESOURCES = "/Applications/Codex.app/Contents/Resources"
+TYPING_INTERVAL_SECONDS = CONFIG.get("typing_interval_seconds", 20)
 TEST_BOT_AUTHOR_IDS = parse_id_set(os.environ.get("DISCORD_BOT_TEST_AUTHOR_IDS"))
 TEST_MESSAGE_NONCE = os.environ.get("DISCORD_BOT_TEST_NONCE")
 
 SESSIONS_FILE = Path(__file__).parent / f"sessions-{BOT_NAME}.json"
+_thread_locks: dict[int, asyncio.Lock] = {}
+_codex_semaphore = asyncio.Semaphore(CODEX_MAX_CONCURRENT_RUNS)
+
+
+def get_thread_lock(channel_id: int) -> asyncio.Lock:
+    lock = _thread_locks.get(channel_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _thread_locks[channel_id] = lock
+    return lock
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +235,7 @@ def remove_worktree(project_dir: str, thread_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Claude Code runner
+# Codex runner
 # ---------------------------------------------------------------------------
 
 async def _kill_proc(proc: asyncio.subprocess.Process) -> None:
@@ -236,44 +248,82 @@ async def _kill_proc(proc: asyncio.subprocess.Process) -> None:
         pass
 
 
-async def run_claude_code(work_dir: str, prompt: str, session_id: str | None) -> dict:
-    """Run `claude` CLI in stream-json mode with idle + hard timeouts.
-
-    Idle timeout kicks in only when nothing is emitted for CLAUDE_IDLE_TIMEOUT
-    seconds, so long-running tasks don't fail as long as Claude keeps making
-    progress. CLAUDE_HARD_TIMEOUT is an absolute cap to prevent runaway runs.
-    """
-    args = [
-        "claude",
-        "-p", prompt,
-        "--output-format", "stream-json",
-        "--verbose",
-        "--max-turns", str(CLAUDE_MAX_TURNS),
-        "--permission-mode", "bypassPermissions",
-    ]
+def build_codex_args(session_id: str | None) -> list[str]:
+    args = ["codex", "exec"]
     if session_id:
-        args.extend(["--resume", session_id])
+        args.append("resume")
+
+    args.extend([
+        "--json",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--skip-git-repo-check",
+        "--config",
+        'project_doc_fallback_filenames=["CLAUDE.md"]',
+        "--config",
+        "project_doc_max_bytes=131072",
+    ])
+    if CODEX_MODEL:
+        args.extend(["--model", str(CODEX_MODEL)])
+
+    if session_id:
+        args.extend([session_id, "-"])
+    else:
+        args.append("-")
+    return args
+
+
+async def run_codex_code(work_dir: str, prompt: str, session_id: str | None) -> dict:
+    """Run `codex exec` in JSONL mode with idle + hard timeouts.
+
+    Idle timeout kicks in only when nothing is emitted for CODEX_IDLE_TIMEOUT
+    seconds, so long-running tasks don't fail as long as Codex keeps making
+    progress. CODEX_HARD_TIMEOUT is an absolute cap to prevent runaway runs.
+    """
+    async with _codex_semaphore:
+        return await _run_codex_code_unlocked(work_dir, prompt, session_id)
+
+
+async def _run_codex_code_unlocked(work_dir: str, prompt: str, session_id: str | None) -> dict:
+    args = build_codex_args(session_id)
 
     home = Path.home()
-    env = {**os.environ, "PATH": f"{home}/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"}
+    env_path = ":".join([
+        f"{home}/.npm-global/bin",
+        f"{home}/.local/bin",
+        f"{home}/.local/node-v22/bin",
+        CODEX_APP_RESOURCES,
+        os.environ.get("PATH", ""),
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+    ])
+    env = {**os.environ, "PATH": env_path}
 
-    claude_path = shutil.which("claude", path=env["PATH"])
+    codex_path = shutil.which("codex", path=env["PATH"])
+    if codex_path:
+        args[0] = codex_path
+    else:
+        raise RuntimeError(f"codex CLI not found on PATH: {env['PATH']}")
     print(
-        f"[claude] launching cwd={work_dir} claude={claude_path} "
-        f"resume={session_id} max_turns={CLAUDE_MAX_TURNS}",
+        f"[codex] launching cwd={work_dir} codex={codex_path} "
+        f"resume={session_id} model={CODEX_MODEL or '(default)'}",
         file=sys.stderr,
     )
 
     last_stdout_lines: list[str] = []
+    agent_messages: list[str] = []
+    thread_id: str | None = None
+    usage: dict | None = None
+    last_event: dict | None = None
 
-    # stream-json events for tool_use / tool_result can blow past the 64 KiB
-    # default buffer; raise it so readline() doesn't die with
-    # "Separator is found, but chunk is longer than limit".
+    # JSONL events for tool calls can blow past the 64 KiB default buffer;
+    # raise it so readline() doesn't die with a long-chunk error.
     proc = await asyncio.create_subprocess_exec(
         *args,
         cwd=work_dir,
         env=env,
-        stdin=asyncio.subprocess.DEVNULL,
+        stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         limit=10 * 1024 * 1024,
@@ -282,8 +332,8 @@ async def run_claude_code(work_dir: str, prompt: str, session_id: str | None) ->
     loop = asyncio.get_event_loop()
     started_at = loop.time()
     last_activity = started_at
-    result_event: dict | None = None
     stderr_buf = bytearray()
+    stderr_limit = 256 * 1024
 
     async def drain_stderr() -> None:
         while True:
@@ -291,24 +341,42 @@ async def run_claude_code(work_dir: str, prompt: str, session_id: str | None) ->
             if not chunk:
                 return
             stderr_buf.extend(chunk)
+            if len(stderr_buf) > stderr_limit:
+                del stderr_buf[:-stderr_limit]
+
+    async def feed_stdin() -> None:
+        if proc.stdin is None:
+            return
+        try:
+            proc.stdin.write(prompt.encode())
+            await proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            try:
+                proc.stdin.close()
+                await proc.stdin.wait_closed()
+            except Exception:
+                pass
 
     stderr_task = asyncio.create_task(drain_stderr())
+    stdin_task = asyncio.create_task(feed_stdin())
 
     try:
         while True:
             now = loop.time()
-            idle_budget = CLAUDE_IDLE_TIMEOUT - (now - last_activity)
-            hard_budget = CLAUDE_HARD_TIMEOUT - (now - started_at)
+            idle_budget = CODEX_IDLE_TIMEOUT - (now - last_activity)
+            hard_budget = CODEX_HARD_TIMEOUT - (now - started_at)
             budget = min(idle_budget, hard_budget)
 
             if budget <= 0:
                 await _kill_proc(proc)
                 reason = (
-                    f"no output for {CLAUDE_IDLE_TIMEOUT}s"
+                    f"no output for {CODEX_IDLE_TIMEOUT}s"
                     if idle_budget <= hard_budget
-                    else f"total runtime exceeded {CLAUDE_HARD_TIMEOUT}s"
+                    else f"total runtime exceeded {CODEX_HARD_TIMEOUT}s"
                 )
-                raise RuntimeError(f"Claude Code timed out ({reason})")
+                raise RuntimeError(f"Codex timed out ({reason})")
 
             try:
                 line = await asyncio.wait_for(proc.stdout.readline(), timeout=budget)
@@ -330,16 +398,38 @@ async def run_claude_code(work_dir: str, prompt: str, session_id: str | None) ->
             except json.JSONDecodeError:
                 continue
 
-            if event.get("type") == "result":
-                result_event = event
+            last_event = event
+            if event.get("type") == "thread.started":
+                thread_id = event.get("thread_id") or thread_id
+            elif event.get("type") == "item.completed":
+                item = event.get("item") or {}
+                if item.get("type") == "agent_message":
+                    text = str(item.get("text") or "").strip()
+                    if text:
+                        agent_messages.append(text)
+            elif event.get("type") == "turn.completed":
+                usage = event.get("usage") or usage
     except BaseException:
         await _kill_proc(proc)
+        stdin_task.cancel()
+        stderr_task.cancel()
         raise
 
     try:
         await asyncio.wait_for(proc.wait(), timeout=5)
     except asyncio.TimeoutError:
         await _kill_proc(proc)
+
+    try:
+        await asyncio.wait_for(stdin_task, timeout=2)
+    except asyncio.TimeoutError:
+        stdin_task.cancel()
+        try:
+            await stdin_task
+        except (asyncio.CancelledError, Exception):
+            pass
+    except (asyncio.CancelledError, Exception):
+        pass
 
     try:
         await asyncio.wait_for(stderr_task, timeout=2)
@@ -353,31 +443,26 @@ async def run_claude_code(work_dir: str, prompt: str, session_id: str | None) ->
         pass
 
     if proc.returncode != 0:
-        err = stderr_buf.decode(errors="replace")[:1000]
-        failure = describe_claude_failure(proc.returncode, err, result_event)
+        err = stderr_buf.decode(errors="replace")[-1000:]
+        failure = describe_codex_failure(proc.returncode, err, last_event)
         tail = " | ".join(last_stdout_lines) or "(no stdout)"
         sid = session_id or "(new)"
         print(
-            f"[claude] exit={proc.returncode} session={sid} cwd={work_dir} "
+            f"[codex] exit={proc.returncode} session={sid} cwd={work_dir} "
             f"failure={failure!r} stderr={err!r} last_stdout={tail!r} "
             f"PATH={env.get('PATH', '')[:120]} HOME={env.get('HOME', '')} args={args}",
             file=sys.stderr,
         )
-        if session_id and proc.returncode == 1 and not err and not result_event:
-            print(
-                f"[claude] retrying without --resume after silent exit (session={sid})",
-                file=sys.stderr,
-            )
-            return await run_claude_code(work_dir, prompt, None)
         raise RuntimeError(failure)
 
-    if result_event is None:
-        raise RuntimeError("Claude Code did not emit a result event")
+    if thread_id is None and session_id is None:
+        raise RuntimeError("Codex did not emit a thread.started event")
 
     return {
-        "text": result_event.get("result") or "(no response)",
-        "sessionId": result_event.get("session_id"),
-        "cost": result_event.get("total_cost_usd", 0),
+        "text": "\n\n".join(agent_messages) or "(no response)",
+        "sessionId": thread_id or session_id,
+        "cost": 0,
+        "usage": usage or {},
     }
 
 
@@ -447,11 +532,20 @@ async def send_outbox_files(
 
 
 def build_prompt_with_inbox(user_text: str, saved: list[Path]) -> str:
-    """Pass the user prompt through unchanged. The _inbox/_outbox convention
-    is documented in ~/.claude/CLAUDE.md so we don't pollute each prompt with
-    a preamble. `saved` is kept in the signature for callers but no longer
-    surfaced — Claude will `ls _inbox/` on demand."""
-    return user_text
+    """Attach the Discord file-transfer convention to each Codex turn."""
+    parts = [
+        (
+            "[Discord連携ルール]\n"
+            "- 添付ファイルがある場合は、作業ディレクトリ直下の `_inbox/` を確認してください。\n"
+            "- Discordへ返したい生成物は `_outbox/` に保存してください。Botが実行後に送信します。\n"
+            "- 最終応答はDiscordにそのまま投稿される本文として、簡潔に書いてください。"
+        )
+    ]
+    inbox_note = format_inbox_for_prompt(saved)
+    if inbox_note:
+        parts.append(inbox_note)
+    parts.append(f"[ユーザーの依頼]\n{user_text}")
+    return "\n\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -485,7 +579,7 @@ class TypingLoop:
                     await self.channel.typing()
                 except Exception:
                     pass
-                await asyncio.sleep(5)
+                await asyncio.sleep(TYPING_INTERVAL_SECONDS)
         except asyncio.CancelledError:
             pass
 
@@ -538,8 +632,11 @@ async def handle_sessions(channel: discord.abc.Messageable) -> None:
         last_used = datetime.fromisoformat(s["lastUsed"].replace("Z", "+00:00"))
         age = int((datetime.now(timezone.utc) - last_used).total_seconds() / 60)
         wt = " 🌿" if s.get("worktreePath") else ""
+        agent = s.get("agent") or "legacy"
+        agent_label = "" if agent == CODEX_AGENT_NAME else f" [{agent}]"
         lines.append(
-            f"  **{s['threadName']}** ({s['messageCount']} msgs, {age}min ago){wt} <#{thread_id}>"
+            f"  **{s['threadName']}** ({s['messageCount']} msgs, {age}min ago)"
+            f"{wt}{agent_label} <#{thread_id}>"
         )
     await send_long_message(
         channel,
@@ -559,6 +656,7 @@ async def handle_status(channel: discord.abc.Messageable) -> None:
         f"{PROJECT_EMOJI} **{PROJECT_DISPLAY}** status:",
         f"  Dir: `{PROJECT_DIR}`",
         f"  Sessions: {len(sessions)}",
+        f"  Agent: {CODEX_AGENT_NAME}",
         f"  Auto-pull: {'on' if AUTO_PULL else 'off'}",
         f"  Worktree: {'on' if WORKTREE_ENABLED else 'off'}",
         f"  Notify: {'<#' + str(NOTIFY_CHANNEL_ID) + '>' if NOTIFY_CHANNEL_ID else 'off'}",
@@ -623,6 +721,14 @@ async def handle_forum_new_session(message: discord.Message, text: str) -> None:
 async def _start_session(
     thread, text: str, thread_name: str, trigger_message: discord.Message | None = None
 ) -> None:
+    lock = get_thread_lock(thread.id)
+    async with lock:
+        await _start_session_locked(thread, text, thread_name, trigger_message)
+
+
+async def _start_session_locked(
+    thread, text: str, thread_name: str, trigger_message: discord.Message | None = None
+) -> None:
     # Reserve session immediately to prevent duplicate processing
     sessions = load_sessions()
     if str(thread.id) in sessions:
@@ -632,6 +738,7 @@ async def _start_session(
         "projectDir": PROJECT_DIR,
         "workDir": PROJECT_DIR,
         "worktreePath": None,
+        "agent": CODEX_AGENT_NAME,
         "threadName": thread_name,
         "createdAt": now_iso(),
         "lastUsed": now_iso(),
@@ -657,7 +764,7 @@ async def _start_session(
     typing.start()
 
     try:
-        result = await run_claude_code(work_dir, prompt, None)
+        result = await run_codex_code(work_dir, prompt, None)
         typing.stop()
 
         sessions = load_sessions()
@@ -666,6 +773,7 @@ async def _start_session(
             "projectDir": PROJECT_DIR,
             "workDir": work_dir,
             "worktreePath": worktree_path,
+            "agent": CODEX_AGENT_NAME,
             "threadName": thread_name,
             "createdAt": now_iso(),
             "lastUsed": now_iso(),
@@ -694,12 +802,25 @@ async def _start_session(
 # ---------------------------------------------------------------------------
 
 async def handle_thread_message(message: discord.Message) -> None:
+    lock = get_thread_lock(message.channel.id)
+    async with lock:
+        await _handle_thread_message_locked(message)
+
+
+async def _handle_thread_message_locked(message: discord.Message) -> None:
     sessions = load_sessions()
     session = sessions.get(str(message.channel.id))
 
     if not session:
         print(f"[DEBUG] handle_thread_message: no session for {message.channel.id}, msg={message.id}")
         return  # Silently ignore instead of spamming
+
+    if session.get("sessionId") and session.get("agent") != CODEX_AGENT_NAME:
+        await message.channel.send(
+            "このスレッドは旧AIセッションなので、Codexでは再開できません。"
+            "新しいスレッドで始め直してください。"
+        )
+        return
 
     work_dir = session.get("workDir", session["projectDir"])
 
@@ -726,15 +847,16 @@ async def handle_thread_message(message: discord.Message) -> None:
     typing.start()
 
     try:
-        result = await run_claude_code(
+        result = await run_codex_code(
             work_dir,
             prompt,
-            session["sessionId"],
+            session.get("sessionId"),
         )
         typing.stop()
 
         if result["sessionId"]:
             session["sessionId"] = result["sessionId"]
+        session["agent"] = CODEX_AGENT_NAME
         session["lastUsed"] = now_iso()
         session["messageCount"] += 1
         save_sessions(sessions)
@@ -763,7 +885,7 @@ async def handle_dm(message: discord.Message) -> None:
     typing.start()
 
     try:
-        result = await run_claude_code(PROJECT_DIR, message.content.strip(), None)
+        result = await run_codex_code(PROJECT_DIR, message.content.strip(), None)
         typing.stop()
         await send_long_message(message.channel, result["text"])
     except Exception as e:
@@ -811,7 +933,7 @@ async def on_ready():
         def _llm(merchant: str) -> str:
             # Initial implementation: bucket every unknown merchant as 'その他'.
             # The categorizer caches the result so each unknown merchant only hits this once.
-            # Replace this stub with an Anthropic Haiku call when budget allows; the contract
+            # Replace this stub with a small LLM classifier when budget allows; the contract
             # is `(merchant: str) -> category in CATEGORIES`. See spec §8 for the prompt.
             return "その他"
 
@@ -897,6 +1019,13 @@ async def _handle_message(message: discord.Message):
     is_mention = is_bot_addressed(
         user_mention_ids, role_mention_ids, client.user.id, my_role_ids
     )
+    mentions_another_bot = any(
+        getattr(user, "bot", False) and user.id != client.user.id
+        for user in message.mentions
+    ) or any(
+        getattr(role, "managed", False) and role.id not in my_role_ids
+        for role in message.role_mentions
+    )
 
     is_dm = message.channel.type == ChannelType.private
     is_thread = message.channel.type in (ChannelType.public_thread, ChannelType.private_thread)
@@ -939,11 +1068,13 @@ async def _handle_message(message: discord.Message):
         is_our_channel = CONTROL_CHANNEL_ID and parent_id == CONTROL_CHANNEL_ID
         print(f"[thread] parent_id={parent_id} control={CONTROL_CHANNEL_ID} is_ours={is_our_channel} mention={is_mention}")
 
-        if not is_our_channel and not is_mention:
-            # Check if we have an existing session for this thread
-            sessions = load_sessions()
-            if str(message.channel.id) not in sessions:
-                return  # Not our thread, ignore silently
+        if CONTROL_CHANNEL_ID is not None and not is_our_channel and not is_mention:
+            # A stale session entry must not let this bot keep responding in
+            # another bot's forum. Cross-bot contamination was the source of
+            # General Bot replying inside Kanojo/KB-owned threads.
+            return
+        if is_our_channel and mentions_another_bot and not is_mention:
+            return
 
         content = strip_mentions(message_content, {client.user.id}, my_role_ids)
         if not content:
@@ -976,6 +1107,7 @@ async def _handle_message(message: discord.Message):
 # ---------------------------------------------------------------------------
 
 def main():
+    acquire_or_exit(Path(__file__).parent, BOT_NAME)
     print(f"Starting bot [{BOT_NAME}] ({PROJECT_DISPLAY})...")
     client.run(BOT_TOKEN, log_handler=None)
 

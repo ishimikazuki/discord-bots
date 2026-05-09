@@ -1,7 +1,7 @@
 <document>
   <project_overview>
-    <purpose>Discord bot 群からメンションで Claude Code を呼び、bot 毎のフォーラムでスレッド会話する</purpose>
-    <tech_stack>Python 3.13 + discord.py 2.x / Claude Code CLI (OAuth) / macOS launchd LaunchAgent</tech_stack>
+    <purpose>Discord bot 群からメンションで Codex を呼び、bot 毎のフォーラムでスレッド会話する</purpose>
+    <tech_stack>Python 3.13 + discord.py 2.x / Codex CLI (ChatGPT login) / macOS launchd LaunchAgent</tech_stack>
     <phase>production on kazuki-macmini (remote mac mini), 4 bots: general / kb / kanojo / yumekano-coe</phase>
   </project_overview>
 
@@ -15,13 +15,17 @@
   <current_work>PLANS.md を参照</current_work>
 
   <decisions>
-    <decision date="2026-04-22">ssh nohup 起動は keychain ロックで claude OAuth 読めず不可。LaunchAgent + gui/$UID 必須</decision>
+    <decision date="2026-04-22">ssh nohup 起動は GUI セッションの認証・keychain 周りで不安定なため不可。LaunchAgent + gui/$UID 必須</decision>
     <decision date="2026-04-22">bot 毎に専用フォーラム（案A）。共通ロールだと全 bot が一斉反応するため却下</decision>
     <decision date="2026-04-22">plist 命名を com.kazuki-macmini.discord-bot-* に変更し旧 com.akimare.* と衝突回避</decision>
     <decision date="2026-04-23">ファイル転送は _inbox / _outbox 規約（案A 最小実装）。10MB 超は警告のみ、必要になれば案B (Drive) に拡張</decision>
     <decision date="2026-05-07">kanojo bot を追加 (reserved を置換)。card_summary パッケージでカード利用サマリーを 1日3回 Discord 投稿、スレッド返信は context-file 注入で文脈保持</decision>
     <decision date="2026-05-09">card_summary のデータ取得を Gmail から エポスNet スクレイピング中心に設計ピボット。メールは加盟店名取れず実用性低いため</decision>
     <decision date="2026-05-09">scheduler に 03:00 JST のエポスNet reconciliation を追加。既存 Gmail fetch は legacy/併用として維持し、DB の source 列で区別する</decision>
+    <decision date="2026-05-09">Discord thread ごとの Codex 実行は bot.py 内の per-thread asyncio.Lock で直列化する。同一 sessionId への並列 resume が重複返信・不安定化の原因になるため</decision>
+    <decision date="2026-05-09">bot ごとの Codex 実行は default 1 並列に制限し、旧 Node 版 bot.js は明示 opt-in なしでは起動不可にする。KB/General の実地Discord検証で旧 bot.js 返信と typing rate limit を確認したため</decision>
+    <decision date="2026-05-09">Discord bot のAI実行基盤を Claude Code から Codex CLI (`codex exec --json`) へ移行。既存 Claude sessionId は Codex で resume できないため、旧セッションは新規スレッド開始を促す</decision>
+    <decision date="2026-05-09">General Bot の token は macOS Keychain を唯一の有効ソースにする。外部に残った旧 Node runtime が旧 token で三重返信していたため、Developer Portal で token rotate して stale runtime を無効化した</decision>
   </decisions>
 
   <logs>PROJECT_LOG/INDEX.md</logs>

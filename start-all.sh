@@ -1,10 +1,5 @@
 #!/bin/bash
-# 3つのDiscord Botを起動
-DIR="$(cd "$(dirname "$0")" && pwd)"
+set -euo pipefail
 
-echo "Starting all Discord bots..."
-node "$DIR/bot.js" knowledge-hub-bot &
-node "$DIR/bot.js" general-bot &
-node "$DIR/bot.js" reserved-bot &
-echo "All bots started. PIDs: $(jobs -p)"
-wait
+echo "start-all.sh is deprecated. Use launchd/install-macmini.sh or start-bots.command."
+exit 1

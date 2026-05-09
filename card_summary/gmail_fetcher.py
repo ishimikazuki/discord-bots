@@ -1,4 +1,4 @@
-"""Gmail API client. Direct REST, not MCP, since MCP is Claude-Code-only."""
+"""Gmail API client. Direct REST, not MCP, since the bot process runs outside the agent."""
 from __future__ import annotations
 import logging
 from pathlib import Path

@@ -23,7 +23,9 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <string>/Users/akimare/.npm-global/bin:/Users/akimare/.local/bin:/Users/akimare/.local/node-v22/bin:/Applications/Codex.app/Contents/Resources:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/akimare</string>
         <key>PYTHONUNBUFFERED</key>
         <string>1</string>
     </dict>

@@ -28,7 +28,7 @@ def test_inbox_prompt_single(tmp_path):
     out = format_inbox_for_prompt([f])
     assert "photo.png" in out
     assert str(f) in out
-    # Should mention the inbox convention so Claude knows where to read
+    # Should mention the inbox convention so Codex knows where to read
     assert "_inbox" in out or "添付" in out
 
 

@@ -1,6 +1,12 @@
+if (process.env.ALLOW_LEGACY_BOT_JS !== '1') {
+  console.error('bot.js is deprecated and disabled. Use python bot.py <bot_name> via launchd.');
+  process.exit(1);
+}
+
 const { Client, GatewayIntentBits, Partials, ChannelType } = require('discord.js');
 const { execSync, spawn } = require('child_process');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 // ---------------------------------------------------------------------------
@@ -24,16 +30,18 @@ if (!BOT_TOKEN) {
   process.exit(1);
 }
 
+const HOME_DIR = os.homedir();
+
 // Project definitions -- add new projects here
 const PROJECTS = {
   kb: {
     name: 'knowledge-hub',
-    dir: '/Users/akimare/knowledge-hub',
+    dir: path.join(HOME_DIR, 'knowledge-hub'),
     emoji: '\u{1F4DA}',
   },
   general: {
     name: 'general',
-    dir: '/Users/akimare',
+    dir: HOME_DIR,
     emoji: '\u{1F3E0}',
   },
 };
@@ -61,52 +69,84 @@ function saveSessions(sessions) {
 }
 
 // ---------------------------------------------------------------------------
-// Claude Code runner
+// Codex runner
 // ---------------------------------------------------------------------------
 
-function runClaudeCode(projectDir, prompt, sessionId) {
+function runCodexCode(projectDir, prompt, sessionId) {
   return new Promise((resolve, reject) => {
-    const args = [
-      '-p', prompt,
-      '--output-format', 'json',
-      '--max-turns', '25',
-      '--permission-mode', 'bypassPermissions',
-    ];
-
+    const args = ['exec'];
     if (sessionId) {
-      args.push('--resume', sessionId);
+      args.push('resume');
+    }
+    args.push(
+      '--json',
+      '--dangerously-bypass-approvals-and-sandbox',
+      '--skip-git-repo-check',
+      '--config',
+      'project_doc_fallback_filenames=["CLAUDE.md"]',
+      '--config',
+      'project_doc_max_bytes=131072',
+    );
+    if (sessionId) {
+      args.push(sessionId, '-');
+    } else {
+      args.push('-');
     }
 
-    const proc = spawn('claude', args, {
+    const proc = spawn('codex', args, {
       cwd: projectDir,
       env: {
         ...process.env,
-        PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin',
+        PATH: [
+          `${process.env.HOME}/.npm-global/bin`,
+          `${process.env.HOME}/.local/bin`,
+          `${process.env.HOME}/.local/node-v22/bin`,
+          '/Applications/Codex.app/Contents/Resources',
+          process.env.PATH || '',
+          '/opt/homebrew/bin',
+          '/usr/local/bin',
+          '/usr/bin',
+          '/bin',
+        ].join(':'),
       },
       timeout: 300000, // 5 min
     });
 
     let stdout = '';
     let stderr = '';
+    proc.stdin.write(prompt);
+    proc.stdin.end();
 
     proc.stdout.on('data', (data) => { stdout += data.toString(); });
     proc.stderr.on('data', (data) => { stderr += data.toString(); });
 
     proc.on('close', (code) => {
       if (code === 0) {
-        try {
-          const json = JSON.parse(stdout);
-          resolve({
-            text: json.result || '(no response)',
-            sessionId: json.session_id || null,
-            cost: json.total_cost_usd || 0,
-          });
-        } catch {
-          // JSON parse failed -- return raw text
-          resolve({ text: stdout.trim() || '(no response)', sessionId: null, cost: 0 });
+        let threadId = sessionId || null;
+        const messages = [];
+        for (const line of stdout.split(/\r?\n/)) {
+          if (!line.trim()) continue;
+          try {
+            const event = JSON.parse(line);
+            if (event.type === 'thread.started') {
+              threadId = event.thread_id || threadId;
+            } else if (event.type === 'item.completed') {
+              const item = event.item || {};
+              if (item.type === 'agent_message' && item.text) {
+                messages.push(String(item.text).trim());
+              }
+            }
+          } catch {
+            // Ignore non-JSON log lines.
+          }
         }
+        resolve({
+          text: messages.join('\n\n') || '(no response)',
+          sessionId: threadId,
+          cost: 0,
+        });
       } else {
-        reject(new Error(`Claude Code exited ${code}: ${stderr.slice(0, 500)}`));
+        reject(new Error(`Codex exited ${code}: ${stderr.slice(-500)}`));
       }
     });
 
@@ -222,7 +262,7 @@ async function handleNewSession(message, projectKey, text) {
   await thread.sendTyping();
 
   try {
-    const result = await runClaudeCode(proj.dir, text, null);
+    const result = await runCodexCode(proj.dir, text, null);
 
     clearInterval(typingInterval);
 
@@ -270,7 +310,7 @@ async function handleThreadMessage(message) {
   await message.channel.sendTyping();
 
   try {
-    const result = await runClaudeCode(
+    const result = await runCodexCode(
       session.projectDir,
       message.content.trim(),
       session.sessionId,
@@ -308,7 +348,7 @@ async function handleDM(message) {
   await message.channel.sendTyping();
 
   try {
-    const result = await runClaudeCode(proj.dir, message.content.trim(), null);
+    const result = await runCodexCode(proj.dir, message.content.trim(), null);
     clearInterval(typingInterval);
     await sendLongMessage(message.channel, result.text);
     console.log(`[dm] ${message.author.tag} -> ${result.text.length} chars`);

@@ -27,9 +27,9 @@ run() {
 
 echo ">>> 1. 既存 bot プロセスを停止"
 if [ "${DRY_RUN:-}" = "1" ]; then
-  echo "would run: pkill -9 -f 'bot.py'"
+  echo "would run: pkill -9 -f '$PROJECT_DIR/bot.py'"
 else
-  pkill -9 -f 'bot.py' 2>/dev/null || true
+  pkill -9 -f "$PROJECT_DIR/bot.py" 2>/dev/null || true
   sleep 2
 fi
 
@@ -42,6 +42,25 @@ else
 fi
 
 echo ">>> 3. 既存 LaunchAgent bootout（あれば）"
+legacy_labels=(
+  "com.akimare.discord-bot"
+  "com.akimare.bot-general"
+  "com.akimare.bot-kb"
+  "com.akimare.bot-reserved"
+  "com.akimare.bot-yumekano-coe"
+)
+for label in "${legacy_labels[@]}"; do
+  if [ "${DRY_RUN:-}" = "1" ]; then
+    echo "would run: launchctl bootout gui/$UID_NUM/$label (if loaded, legacy)"
+  else
+    if launchctl print "gui/$UID_NUM/$label" >/dev/null 2>&1; then
+      launchctl bootout "gui/$UID_NUM/$label" 2>/dev/null || true
+      sleep 1
+    fi
+    rm -f "$AGENTS_DIR/$label.plist"
+  fi
+done
+
 for bot in $BOTS; do
   label="com.$USER_NAME.discord-bot-$bot"
   if [ "${DRY_RUN:-}" = "1" ]; then

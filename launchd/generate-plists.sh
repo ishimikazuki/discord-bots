@@ -49,7 +49,7 @@ for bot in $BOTS; do
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>$HOME_DIR/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <string>$HOME_DIR/.npm-global/bin:$HOME_DIR/.local/bin:$HOME_DIR/.local/node-v22/bin:/Applications/Codex.app/Contents/Resources:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
         <key>PYTHONUNBUFFERED</key>
         <string>1</string>
         <key>HOME</key>

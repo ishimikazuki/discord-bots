@@ -33,7 +33,8 @@
   "allowed_users": [],
   "auto_pull_before_session": true,
   "worktree_enabled": true,
-  "claude_idle_timeout_seconds": 900,
-  "claude_hard_timeout_seconds": 3600,
-  "claude_max_turns": 50
+  "codex_idle_timeout_seconds": 900,
+  "codex_hard_timeout_seconds": 3600,
+  "codex_max_concurrent_runs": 1,
+  "typing_interval_seconds": 20
 }

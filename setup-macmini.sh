@@ -12,9 +12,10 @@ BOTDIR="$HOME/discord-bots"
 VENV="$BOTDIR/.venv"
 LAUNCHD_SRC="$BOTDIR/launchd"
 LAUNCHD_DST="$HOME/Library/LaunchAgents"
+CONFIG="$BOTDIR/config.json"
 
-BOTS=("general" "kb" "reserved")
-TOKEN_ACCOUNTS=("general-bot-token" "kb-bot-token" "reserved-bot-token")
+BOTS=()
+TOKEN_ACCOUNTS=()
 
 echo "=== Discord Bots (1bot=1project) Setup ==="
 echo "User: $(whoami) | Home: $HOME"
@@ -27,12 +28,21 @@ if ! command -v python3 &>/dev/null; then
 fi
 echo "[OK] python3: $(python3 --version)"
 
-# 2. Claude CLI チェック
-if command -v claude &>/dev/null; then
-    echo "[OK] claude: $(claude --version 2>/dev/null || echo 'installed')"
+if [ ! -f "$CONFIG" ]; then
+    echo "[ERROR] config.json が見つかりません: $CONFIG"
+    exit 1
+fi
+BOTS_STR=$(python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); print(" ".join(data["bots"].keys()))' "$CONFIG")
+TOKEN_ACCOUNTS_STR=$(python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); print(" ".join(bot["token_keychain_account"] for bot in data["bots"].values()))' "$CONFIG")
+IFS=' ' read -r -a BOTS <<< "$BOTS_STR"
+IFS=' ' read -r -a TOKEN_ACCOUNTS <<< "$TOKEN_ACCOUNTS_STR"
+
+# 2. Codex CLI チェック
+if command -v codex &>/dev/null; then
+    echo "[OK] codex: $(codex --version 2>/dev/null || echo 'installed')"
 else
-    echo "[WARN] claude CLI が見つかりません:"
-    echo "  npm install -g @anthropic-ai/claude-code"
+    echo "[WARN] codex CLI が見つかりません:"
+    echo "  npm install -g @openai/codex"
 fi
 
 # 3. venv 作成 & 依存インストール
@@ -68,48 +78,20 @@ if [ "$MISSING_TOKENS" -gt 0 ]; then
     exit 1
 fi
 
-# 6. 旧 bot を停止
+# 6. plist 生成・LaunchAgent 登録
 echo ""
-for BOT in "${BOTS[@]}"; do
-    LABEL="com.akimare.bot-${BOT}"
-    if launchctl list 2>/dev/null | grep -q "$LABEL"; then
-        echo "[SETUP] 旧 $BOT bot を停止中..."
-        launchctl unload "$LAUNCHD_DST/${LABEL}.plist" 2>/dev/null || true
-    fi
-done
-# 旧統合版も停止
-if launchctl list 2>/dev/null | grep -q "com.akimare.discord-bot"; then
-    launchctl unload "$LAUNCHD_DST/com.akimare.discord-bot.plist" 2>/dev/null || true
-fi
-
-# 7. plist をユーザーのホームに合わせて生成 & 登録
 echo "[SETUP] launchd に登録中..."
-for BOT in "${BOTS[@]}"; do
-    LABEL="com.akimare.bot-${BOT}"
-    SRC="$LAUNCHD_SRC/${LABEL}.plist"
-    DST="$LAUNCHD_DST/${LABEL}.plist"
-
-    if [ ! -f "$SRC" ]; then
-        echo "[WARN] $SRC が見つかりません、スキップ"
-        continue
-    fi
-
-    sed "s|/Users/akimare|$HOME|g" "$SRC" > "$DST"
-    launchctl load "$DST"
-    echo "  ✅ $BOT -> $LABEL"
-done
+bash "$LAUNCHD_SRC/install-macmini.sh"
 
 echo ""
-echo "=== セットアップ完了！3 bots 起動 ==="
+echo "=== セットアップ完了！${#BOTS[@]} bots 起動 ==="
 echo ""
 echo "確認:"
-echo "  launchctl list | grep 'com.akimare.bot'  # 全bot確認"
-echo "  tail -f ~/discord-bots/logs/general.log   # generalログ"
-echo "  tail -f ~/discord-bots/logs/kb.log        # kbログ"
-echo "  tail -f ~/discord-bots/logs/reserved.log  # reservedログ"
+echo "  launchctl list | grep 'discord-bot'       # 全bot確認"
+echo "  tail -f ~/discord-bots/logs/general.err.log"
 echo ""
 echo "全停止:"
-echo "  for b in general kb reserved; do launchctl unload ~/Library/LaunchAgents/com.akimare.bot-\$b.plist; done"
+echo "  pkill -f '~/discord-bots/bot.py'"
 echo ""
 echo "全再起動:"
-echo "  cd ~/discord-bots && git pull && for b in general kb reserved; do launchctl unload ~/Library/LaunchAgents/com.akimare.bot-\$b.plist 2>/dev/null; launchctl load ~/Library/LaunchAgents/com.akimare.bot-\$b.plist; done"
+echo "  cd ~/discord-bots && git pull && bash launchd/install-macmini.sh"

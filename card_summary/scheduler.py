@@ -261,7 +261,7 @@ async def register_kanojo_session(
     """Pre-populate sessions.json so bot.py's handle_thread_message picks up the thread.
 
     Also write the summary to data/card_summary/contexts/{thread_id}.txt so the
-    first Claude call gets the summary as background context (since the user's
+    first Codex call gets the summary as background context (since the user's
     question alone won't include it).
     """
     CONTEXT_DIR.mkdir(parents=True, exist_ok=True)
@@ -277,6 +277,7 @@ async def register_kanojo_session(
         "projectDir": project_dir,
         "workDir": project_dir,
         "worktreePath": None,
+        "agent": "codex",
         "threadName": thread.name,
         "createdAt": datetime.now().isoformat(),
         "lastUsed": datetime.now().isoformat(),
