@@ -130,6 +130,7 @@ TEST_MESSAGE_NONCE = os.environ.get("DISCORD_BOT_TEST_NONCE")
 SESSIONS_FILE = Path(__file__).parent / f"sessions-{BOT_NAME}.json"
 _thread_locks: dict[int, asyncio.Lock] = {}
 _codex_semaphore = asyncio.Semaphore(CODEX_MAX_CONCURRENT_RUNS)
+_pending_recovery_started = False
 
 
 def get_thread_lock(channel_id: int) -> asyncio.Lock:
@@ -157,6 +158,14 @@ def save_sessions(sessions: dict) -> None:
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def clear_pending_fields(session: dict) -> None:
+    session.pop("pending", None)
+    session.pop("pendingPrompt", None)
+    session.pop("pendingUserText", None)
+    session.pop("pendingStartedAt", None)
+    session.pop("pendingSourceMessageId", None)
 
 
 # ---------------------------------------------------------------------------
@@ -744,6 +753,9 @@ async def _start_session_locked(
         "lastUsed": now_iso(),
         "messageCount": 0,
         "pending": True,
+        "pendingStartedAt": now_iso(),
+        "pendingUserText": text,
+        "pendingSourceMessageId": str(trigger_message.id) if trigger_message else None,
     }
     save_sessions(sessions)
 
@@ -759,6 +771,20 @@ async def _start_session_locked(
     if trigger_message is not None:
         saved_inbox = await save_inbox_attachments(trigger_message, work_dir)
     prompt = build_prompt_with_inbox(text, saved_inbox)
+
+    sessions = load_sessions()
+    session = sessions.get(str(thread.id), {})
+    session.update({
+        "workDir": work_dir,
+        "worktreePath": worktree_path,
+        "pending": True,
+        "pendingPrompt": prompt,
+        "pendingStartedAt": now_iso(),
+        "pendingUserText": text,
+        "pendingSourceMessageId": str(trigger_message.id) if trigger_message else None,
+    })
+    sessions[str(thread.id)] = session
+    save_sessions(sessions)
 
     typing = TypingLoop(thread)
     typing.start()
@@ -793,6 +819,13 @@ async def _start_session_locked(
         typing.stop()
         err_msg = str(e)[:300]
         print(f"[new] Error: {e}", file=sys.stderr)
+        sessions = load_sessions()
+        session = sessions.get(str(thread.id))
+        if session:
+            clear_pending_fields(session)
+            session["lastError"] = err_msg
+            session["lastUsed"] = now_iso()
+            save_sessions(sessions)
         await thread.send(f"❌ Error: {err_msg}")
         await notify(f"❌ [{PROJECT_DISPLAY}] Error: {err_msg}")
 
@@ -821,6 +854,11 @@ async def _handle_thread_message_locked(message: discord.Message) -> None:
             "新しいスレッドで始め直してください。"
         )
         return
+
+    if session.get("pending"):
+        clear_pending_fields(session)
+        session["lastUsed"] = now_iso()
+        save_sessions(sessions)
 
     work_dir = session.get("workDir", session["projectDir"])
 
@@ -894,6 +932,106 @@ async def handle_dm(message: discord.Message) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Pending session recovery
+# ---------------------------------------------------------------------------
+
+async def _fetch_messageable_channel(channel_id: int):
+    channel = client.get_channel(channel_id)
+    if channel is not None:
+        return channel
+    try:
+        return await client.fetch_channel(channel_id)
+    except Exception as e:
+        print(f"[recover] failed to fetch channel {channel_id}: {e}", file=sys.stderr)
+        return None
+
+
+async def _recover_pending_session(thread_id: str, session: dict) -> None:
+    if session.get("agent") != CODEX_AGENT_NAME or not session.get("pending"):
+        return
+    if session.get("sessionId"):
+        return
+
+    channel = await _fetch_messageable_channel(int(thread_id))
+    if channel is None:
+        return
+
+    prompt = session.get("pendingPrompt")
+    if not prompt:
+        await channel.send(
+            "ごめん、Botの再起動で途中だった依頼本文を復元できなかったよ。"
+            "このスレッドでもう一度送ってくれたら、メンションなしで続きから拾うね。"
+        )
+        sessions = load_sessions()
+        current = sessions.get(thread_id)
+        if current and current.get("pending") and not current.get("pendingPrompt"):
+            clear_pending_fields(current)
+            current["lastError"] = "pending prompt missing after bot restart"
+            current["lastUsed"] = now_iso()
+            save_sessions(sessions)
+        print(f"[recover] missing pendingPrompt thread={thread_id}")
+        return
+
+    work_dir = session.get("workDir") or session.get("projectDir") or PROJECT_DIR
+    typing = TypingLoop(channel)
+    typing.start()
+    try:
+        result = await run_codex_code(work_dir, prompt, None)
+        typing.stop()
+
+        sessions = load_sessions()
+        current = sessions.get(thread_id, session)
+        current.update({
+            "sessionId": result.get("sessionId"),
+            "projectDir": current.get("projectDir", PROJECT_DIR),
+            "workDir": work_dir,
+            "agent": CODEX_AGENT_NAME,
+            "lastUsed": now_iso(),
+            "messageCount": max(int(current.get("messageCount", 0)), 0) + 1,
+        })
+        clear_pending_fields(current)
+        sessions[thread_id] = current
+        save_sessions(sessions)
+
+        await send_long_message(channel, result["text"])
+        sent = await send_outbox_files(channel, work_dir)
+
+        cost_str = f" (${result['cost']:.4f})" if result.get("cost") else ""
+        file_str = f" +{sent}files" if sent else ""
+        print(f"[recover] {current.get('threadName', thread_id)} -> {len(result['text'])} chars{cost_str}{file_str}")
+        await notify(f"♻️ [{PROJECT_DISPLAY}] Recovered: **{current.get('threadName', thread_id)}**{cost_str}{file_str}")
+    except Exception as e:
+        typing.stop()
+        err_msg = str(e)[:300]
+        print(f"[recover] Error: {e}", file=sys.stderr)
+        sessions = load_sessions()
+        current = sessions.get(thread_id)
+        if current:
+            clear_pending_fields(current)
+            current["lastError"] = err_msg
+            current["lastUsed"] = now_iso()
+            save_sessions(sessions)
+        await channel.send(f"❌ Error: {err_msg}")
+        await notify(f"❌ [{PROJECT_DISPLAY}] Recovery error in **{session.get('threadName', thread_id)}**: {err_msg}")
+
+
+async def recover_pending_sessions() -> None:
+    sessions = load_sessions()
+    pending = [
+        (thread_id, session)
+        for thread_id, session in sessions.items()
+        if session.get("pending") and session.get("agent") == CODEX_AGENT_NAME
+    ]
+    if not pending:
+        return
+    print(f"[recover] pending sessions: {len(pending)}")
+    for thread_id, session in pending:
+        lock = get_thread_lock(int(thread_id))
+        async with lock:
+            await _recover_pending_session(thread_id, session)
+
+
+# ---------------------------------------------------------------------------
 # Bot setup
 # ---------------------------------------------------------------------------
 
@@ -910,12 +1048,17 @@ _processed_messages: set[int] = set()
 
 @client.event
 async def on_ready():
+    global _pending_recovery_started
     # Startup info goes to the per-bot log file; posting to #agent-notify on
     # every boot floods the channel when launchd restart-loops a crashing bot.
     print(f"[{BOT_NAME}] Logged in as {client.user}")
     print(f"[{BOT_NAME}] Project: {PROJECT_DISPLAY} -> {PROJECT_DIR}")
     print(f"[{BOT_NAME}] Control channel: {CONTROL_CHANNEL_ID or 'any (mention or DM)'}")
     print(f"[{BOT_NAME}] Auto-pull: {AUTO_PULL} | Worktree: {WORKTREE_ENABLED}")
+
+    if not _pending_recovery_started:
+        _pending_recovery_started = True
+        asyncio.create_task(recover_pending_sessions())
 
     if BOT_NAME == "kanojo":
         from card_summary.scheduler import (
