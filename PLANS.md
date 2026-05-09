@@ -19,6 +19,7 @@
 - [ ] selector を実 DOM で verify (`headless=False` + 月選択挙動)
 - [x] `card_summary/scheduler.py` に epos_scraper 統合 (1日1回 深夜 3:00 呼び出し)
 - [x] Discord Bot のAI実行基盤を Claude Code から Codex CLI に置換
+- [x] Codex移行後のカード要約・予定調整・過去スレッド再現契約テストを追加（Discord Bot 98 pass / kanojo 91 pass）
 - [ ] (optional) keychain へ kanojo bot token 移行 (.env から)
 
 ## 発見・予想外のこと
@@ -30,6 +31,7 @@
 - 2026-05-09: macmini 現在ユーザーの login keychain には `service=epos-net` / `account=epos-email|epos-pass|epos-cvv` が見つからない。GUI Terminal 経由でも `SecKeychainSearchCopyNext: The specified item could not be found`。live DOM 検証は credential 再登録後に再実行が必要
 - 2026-05-09: keychain 再登録後、credentials 3 件は取得 OK。既存 Google Chrome profile + Codex Chrome Extension ではログイン/CVV/月別履歴 DOM 取得に成功し、2026年5月のショッピング明細 17 件・合計 41,815 円を確認。一方、Python Playwright の新規 context は画像認証（パズル）でブロックされるため、`fetch_month_history()` の headless 自動運用は追加対策が必要
 - 2026-05-09: Codex CLI (`codex exec --json`) は新規 thread と resume の両方で JSONL イベントを返すことを確認済み。stderr に plugin/skill manifest 警告が出るが、exit 0 なら Bot 応答には影響しない
+- 2026-05-09: `~/kanojo` の project-local skill `screenshot-to-calendar` は `.agents/skills -> ../.claude/skills` を commit/push 済み。Codex `debug prompt-input` で利用可能 skill として表示されることを確認
 
 ## 決定したこと
 - 2026-05-07: spec § 10 の bot.py mention 緩和は不要、既存 `is_thread + is_our_channel` 経路 + context-file 注入で要件達成
