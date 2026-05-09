@@ -6,6 +6,8 @@ Playwright + a live Epos Net session. Run it manually for end-to-end checks.
 from card_summary.epos_scraper import (
     EposLoginChallengeError,
     _parse_amount,
+    _parse_chrome_history_payload,
+    _fetch_month_history_with_chrome_apple_events,
     _parse_date,
     make_source_id,
     rows_to_transactions,
@@ -86,3 +88,83 @@ def test_rows_to_transactions_handles_negative_amount():
     txs = rows_to_transactions(rows)
     assert len(txs) == 1
     assert txs[0].amount == -3200
+
+
+def test_rows_to_transactions_source_id_does_not_shift_when_new_row_is_inserted():
+    old_rows = [
+        ["2026/5/7", "GOOGLE*CLOUD", "-", "2,000円", "1回払い", "2026/6", ""],
+        ["2026/5/8", "NOTION LABS", "-", "815円", "1回払い", "2026/6", ""],
+    ]
+    new_rows = [
+        ["2026/5/1", "NEW STORE", "-", "100円", "1回払い", "2026/6", ""],
+        *old_rows,
+    ]
+
+    old_txs = rows_to_transactions(old_rows)
+    new_txs = rows_to_transactions(new_rows)
+
+    assert new_txs[1].source_id == old_txs[0].source_id
+    assert new_txs[2].source_id == old_txs[1].source_id
+
+
+def test_rows_to_transactions_disambiguates_identical_rows():
+    rows = [
+        ["2026/5/1", "SAME STORE", "-", "100円", "1回払い", "2026/6", ""],
+        ["2026/5/1", "SAME STORE", "-", "100円", "1回払い", "2026/6", ""],
+    ]
+
+    txs = rows_to_transactions(rows)
+
+    assert txs[0].source_id != txs[1].source_id
+
+
+def test_parse_chrome_history_payload_returns_transactions():
+    payload = (
+        '{"ok":true,"rows":[["2026/4/1","ＡＰ／セブンイレブン","－",'
+        '"616円","1回払い","2026/5",""]]}'
+    )
+
+    txs = _parse_chrome_history_payload(payload)
+
+    assert len(txs) == 1
+    assert txs[0].occurred_at == "2026-04-01T00:00:00"
+    assert txs[0].merchant == "ＡＰ／セブンイレブン"
+    assert txs[0].amount == 616
+
+
+def test_parse_chrome_history_payload_raises_actionable_error():
+    try:
+        _parse_chrome_history_payload('{"ok":false,"reason":"image verification required"}')
+    except EposLoginChallengeError as e:
+        assert "image verification required" in str(e)
+    else:
+        raise AssertionError("expected EposLoginChallengeError")
+
+
+def test_chrome_apple_events_fetch_uses_keychain_and_payload(monkeypatch):
+    import card_summary.epos_scraper as epos_scraper
+
+    seen_accounts = []
+
+    def fake_credential(account):
+        seen_accounts.append(account)
+        return f"{account}-secret"
+
+    def fake_run(script, *, timeout=120):
+        assert "Google Chrome" in script
+        assert "use_history_preload.do" in script
+        assert "monthSelectTagsDateMonth" in script
+        assert "epos-pass-secret" in script
+        return (
+            '{"ok":true,"rows":[["2026/5/1","ＧＯＯＧＬＥ＊ＣＬＯＵＤ",'
+            '"－","37円","1回払い","2026/6",""]]}'
+        )
+
+    monkeypatch.setattr(epos_scraper, "get_credential", fake_credential)
+    monkeypatch.setattr(epos_scraper, "_run_osascript", fake_run)
+
+    txs = _fetch_month_history_with_chrome_apple_events(2026, 5)
+
+    assert seen_accounts == ["epos-email", "epos-pass", "epos-cvv"]
+    assert len(txs) == 1
+    assert txs[0].amount == 37

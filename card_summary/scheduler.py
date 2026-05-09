@@ -46,7 +46,11 @@ async def run_slot(
     # 1. fetch new mails
     since = get_fetch_checkpoint(db_path, "gmail")
     log.info("[%s] fetch since=%s", slot, since)
-    raw_mails = await fetch_new(since)
+    try:
+        raw_mails = await fetch_new(since)
+    except Exception:  # noqa: BLE001 - Gmail is a legacy source; DB summaries must keep running.
+        log.exception("[%s] gmail fetch failed; continuing with stored transactions", slot)
+        raw_mails = []
 
     # 2. parse + categorize + store
     categorizer = Categorizer(db_path, llm_fn=llm_fn)
@@ -62,7 +66,8 @@ async def run_slot(
         from dataclasses import replace
         txs.append(replace(tx, category=category))
     upsert_transactions(db_path, txs)
-    set_fetch_checkpoint(db_path, "gmail", today.isoformat())
+    if raw_mails:
+        set_fetch_checkpoint(db_path, "gmail", today.isoformat())
 
     # 3. compute report
     prev = get_summary_state(db_path, slot)
@@ -146,21 +151,43 @@ async def run_reconciliation(
 
     categorizer = Categorizer(db_path, llm_fn=llm_fn)
     categorized = []
+    successful_months = 0
     for year, month in _current_and_previous_months(now):
         log.info("reconciliation: fetching epos history year=%04d month=%02d", year, month)
-        txs = await fetcher(year, month)
+        try:
+            txs = await fetcher(year, month)
+        except Exception:  # noqa: BLE001 - keep any other month's successful data.
+            log.exception(
+                "reconciliation fetch failed for year=%04d month=%02d",
+                year,
+                month,
+            )
+            continue
+        successful_months += 1
         for tx in txs:
             category = categorizer.categorize(tx.merchant)
             categorized.append(replace(tx, category=category))
 
     inserted = upsert_transactions(db_path, categorized)
-    set_fetch_checkpoint(db_path, "epos_net", (now or datetime.now()).isoformat())
+    if successful_months > 0:
+        set_fetch_checkpoint(db_path, "epos_net", (now or datetime.now()).isoformat())
     log.info(
-        "reconciliation complete: fetched=%d inserted=%d",
+        "reconciliation complete: successful_months=%d fetched=%d inserted=%d",
+        successful_months,
         len(categorized),
         inserted,
     )
     return inserted
+
+
+def _checkpoint_is_today(value: str | None, *, now: datetime | None = None) -> bool:
+    if not value:
+        return False
+    now = now or datetime.now()
+    try:
+        return datetime.fromisoformat(value).date() == now.date()
+    except ValueError:
+        return False
 
 
 async def _run_slot_loop(
@@ -198,6 +225,13 @@ async def _run_reconciliation_loop(
     llm_fn: LlmFn,
 ) -> None:
     """Long-running Epos reconciliation loop. Runs once per day at 03:00."""
+    if not _checkpoint_is_today(get_fetch_checkpoint(db_path, "epos_net")):
+        log.info("scheduler: startup reconciliation is due")
+        try:
+            await run_reconciliation(db_path=db_path, llm_fn=llm_fn)
+        except Exception:
+            log.exception("startup reconciliation crashed")
+
     while True:
         next_dt = _next_recon_run()
         delay = _seconds_until(next_dt)
@@ -239,17 +273,33 @@ import json as _json
 
 # Discord glue for bot.py ----------------------------------------------------
 async def post_to_kanojo_forum(client, forum_channel_id: int, thread_name: str, body: str):
-    """Create a thread in the kanojo forum and return it."""
+    """Create a kanojo summary post and return a thread-like object.
+
+    The deployment originally targeted a Discord ForumChannel, but the real
+    kanojo control surface may be a normal TextChannel. Support both so card
+    summaries do not fail because of channel type drift.
+    """
     import discord
     forum = client.get_channel(forum_channel_id)
-    if not isinstance(forum, discord.ForumChannel):
-        raise RuntimeError(f"channel {forum_channel_id} is not a ForumChannel: {type(forum)}")
-    created = await forum.create_thread(
-        name=thread_name,
-        content=body,
-        auto_archive_duration=1440,
-    )
-    return created.thread
+    if forum is None:
+        forum = await client.fetch_channel(forum_channel_id)
+    if isinstance(forum, discord.ForumChannel):
+        created = await forum.create_thread(
+            name=thread_name,
+            content=body,
+            auto_archive_duration=1440,
+        )
+        return created.thread
+    if isinstance(forum, (discord.TextChannel, discord.Thread)):
+        message = await forum.send(body)
+        if isinstance(forum, discord.TextChannel):
+            return await forum.create_thread(
+                name=thread_name,
+                message=message,
+                auto_archive_duration=1440,
+            )
+        return forum
+    raise RuntimeError(f"channel {forum_channel_id} is not postable: {type(forum)}")
 
 async def register_kanojo_session(
     sessions_path: Path,

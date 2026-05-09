@@ -3,8 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 
 # Discord ---------------------------------------------------------------------
-# Set during deployment (Task 18). Use 0 as placeholder to surface mistakes early.
-KANOJO_FORUM_CHANNEL_ID: int = 0  # forum channel under kanojo bot
+# Kanojo control channel. This may be either a ForumChannel or a TextChannel;
+# scheduler.post_to_kanojo_forum handles both.
+KANOJO_FORUM_CHANNEL_ID: int = 1497151379393876020
 
 # DB --------------------------------------------------------------------------
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "card.sqlite3"
