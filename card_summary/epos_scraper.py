@@ -34,6 +34,10 @@ class EposCredentialsError(RuntimeError):
     """Raised when a required keychain credential cannot be read."""
 
 
+class EposLoginChallengeError(RuntimeError):
+    """Raised when Epos Net requires a human-only verification challenge."""
+
+
 def get_credential(account: str, service: str = "epos-net") -> str:
     """Return a credential value from macOS keychain. Raises on missing entry."""
     try:
@@ -141,17 +145,23 @@ async def fetch_month_history(year: int, month: int, *, headless: bool = True) -
         context = await browser.new_context(**ctx_kwargs)
         page = await context.new_page()
 
-        await page.goto(EPOS_LOGIN_URL, wait_until="networkidle")
+        await page.goto(EPOS_LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
 
         # Step 1: ID / password (skipped when storage_state already authenticated)
         login_id = page.locator("input[name='loginId'], input[id*='loginId'], input[id='userid']")
         if await login_id.count() > 0 and await login_id.first.is_visible():
             await login_id.first.fill(email)
             await page.locator(
-                "input[name='loginPassword'], input[type='password']"
+                "input[name='passWord'], input[id='passWord'], input[name='loginPassword'], input[type='password']"
             ).first.fill(password)
             await page.locator("button:has-text('ログイン'), input[value='ログイン']").first.click()
-            await page.wait_for_load_state("networkidle")
+            await page.wait_for_load_state("domcontentloaded", timeout=60000)
+
+        body_text = await page.locator("body").inner_text(timeout=10000)
+        if "画像認証" in body_text or "パズルを完成" in body_text:
+            raise EposLoginChallengeError(
+                "Epos Net requested image/puzzle verification; complete login in a trusted Chrome profile first"
+            )
 
         # Step 2 (optional): ご本人様確認 — 3-digit CVV via on-screen keypad
         if await page.locator("text=ご本人様確認").count() > 0:
@@ -161,10 +171,10 @@ async def fetch_month_history(year: int, month: int, *, headless: bool = True) -
             await page.locator(
                 "button:has-text('次へ'), input[value='次へ']"
             ).first.click()
-            await page.wait_for_load_state("networkidle")
+            await page.wait_for_load_state("domcontentloaded", timeout=60000)
 
         # Step 3: 月別ご利用履歴照会
-        await page.goto(EPOS_HISTORY_URL, wait_until="networkidle")
+        await page.goto(EPOS_HISTORY_URL, wait_until="domcontentloaded", timeout=60000)
         try:
             await page.locator("select").first.wait_for(timeout=5000)
             await page.select_option("select >> nth=0", str(year))
@@ -172,7 +182,7 @@ async def fetch_month_history(year: int, month: int, *, headless: bool = True) -
             submit = page.locator("button:has-text('照会'), input[value='照会']")
             if await submit.count() > 0:
                 await submit.first.click()
-                await page.wait_for_load_state("networkidle")
+                await page.wait_for_load_state("domcontentloaded", timeout=60000)
         except Exception as e:  # noqa: BLE001 — page layout drift is expected
             log.warning("year/month selection failed (%s); continuing with default view", e)
 

@@ -1,6 +1,7 @@
 """SQLite persistence layer for card_summary."""
 from __future__ import annotations
 import sqlite3
+import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -181,12 +182,17 @@ def get_monthly_close(db_path: Path, year_month: str) -> int | None:
         return row["confirmed_amount"] if row else None
 
 # category_rules -------------------------------------------------------------
+def normalize_merchant(value: str) -> str:
+    """Normalize merchant/rule text for matching Epos Net full-width names."""
+    return unicodedata.normalize("NFKC", value).upper()
+
+
 def seed_category_rules(db_path: Path, mapping: dict[str, str]) -> None:
     """Bulk insert seed rules. Won't overwrite existing rules."""
     with _conn(db_path) as c:
         c.executemany(
             "INSERT OR IGNORE INTO category_rules (pattern, category, source) VALUES (?, ?, 'seed')",
-            [(k.upper(), v) for k, v in mapping.items()],
+            [(normalize_merchant(k), v) for k, v in mapping.items()],
         )
 
 def set_category_rule(db_path: Path, pattern: str, category: str, *, source: str) -> None:
@@ -196,7 +202,7 @@ def set_category_rule(db_path: Path, pattern: str, category: str, *, source: str
             INSERT INTO category_rules (pattern, category, source) VALUES (?, ?, ?)
             ON CONFLICT(pattern) DO UPDATE SET category = excluded.category, source = excluded.source
             """,
-            (pattern.upper(), category, source),
+            (normalize_merchant(pattern), category, source),
         )
 
 def get_category_for(db_path: Path, merchant: str) -> str | None:
@@ -207,7 +213,7 @@ def get_category_for(db_path: Path, merchant: str) -> str | None:
     """
     if not merchant:
         return None
-    upper = merchant.upper()
+    upper = normalize_merchant(merchant)
     with _conn(db_path) as c:
         rows = c.execute(
             "SELECT pattern, category FROM category_rules ORDER BY LENGTH(pattern) DESC, pattern"

@@ -52,6 +52,34 @@
   - `pytest tests/card_summary/ -q` → 55 passed
   - `pytest -q` → 81 passed
 
+### エポスNet selector verify 継続 (`2026-05-09`)
+- keychain 再登録後、`epos-email` / `epos-pass` / `epos-cvv` (service=`epos-net`) は macmini login keychain から取得 OK
+- Python Playwright の新規 Chromium/Chrome context ではログイン後に画像認証（「ピースを動かして、パズルを完成」）が出る
+  - CAPTCHA 相当なので自動突破しない
+  - `fetch_month_history()` は画像認証を検知したら `EposLoginChallengeError` を投げるよう修正
+- 既存 Google Chrome profile + Codex Chrome Extension ではログイン成功
+  - login input: `input[name="loginId"]`
+  - password input: `input[name="passWord"]`
+  - login submit: `input[value="ログイン"]`
+  - CVV keypad: `button` の数字テキスト (`button "1"` 等)
+  - history URL: `/memberservice/pc/usehistoryreference/use_history_preload.do`
+  - 年/月は `select` 2 つ（表示上は「ご利用年」「ご利用月」）
+  - 明細 table は通常の `table tbody tr` でセル順 `[日付, 加盟店, 内容, 金額, 支払区分, 開始月, 備考]`
+- 2026年5月のショッピング明細は 17 件、合計 41,815 円を DOM 上で確認
+  - 例: `ＧＯＯＧＬＥ＊ＣＬＯＵＤ ６ＺＰＰＣ６` 37円
+  - 例: `ＡＰ／サミツト` 8,439円
+  - 例: `ＡＰ／セブンイレブン` 259円
+  - 例: `ＮＯＴＩＯＮ ＬＡＢＳ， ＩＮＣ．` 815円
+- 実加盟店名は全角英数字・全角記号が混在するため、category lookup に NFKC 正規化を追加
+  - `ＡＰ／サミツト` → `AP/サミツト` → `食費`
+  - `ＧＯＯＧＬＥ＊ＣＬＯＵＤ ...` → `GOOGLE*CLOUD ...` → `サブスク`
+- macmini 実行結果:
+  - `pytest tests/card_summary/ -q` → 57 passed
+  - `pytest -q` → 88 passed
+- 残課題:
+  - Codex Chrome Extension で DOM 観察は可能だが、scheduler が使う Python `fetch_month_history()` は別 browser context のため Chrome profile の信頼状態を継承しない
+  - headless 自動運用には、専用 Playwright profile を一度手動認証して storage_state を作る、または既存 Chrome profile を安全に使う運用設計が必要
+
 ## Discoveries
 
 ### 重要な前提崩壊
@@ -77,6 +105,7 @@
 - 既存 `bot.py` の `get_from_env_file` を使い `~/discord-bots/.env` への書き込みで回避
 - LaunchAgent (gui/$UID) は keychain アクセス可能 (memory にも記載済み)
 - 2026-05-09 追記: 現在の macmini login keychain では `service=epos-net` も `account=epos-email|epos-pass|epos-cvv` も未検出。CLI と GUI Terminal `.command` 実行の両方で `SecKeychainSearchCopyNext: The specified item could not be found`。selector live DOM 検証は credential 再登録後に再試行する
+- 2026-05-09 追記2: credentials 再登録後は取得 OK。未信頼 Playwright context では画像認証が出るが、既存 Chrome profile では CVV のみでログインできる
 
 ### Discord Developer Portal / Google Cloud / エポスNet の browser-use 操作
 - browser-use 独自プロファイルは Chrome の普段ログインを使えない (= かーくん側ブラウザと「タブ競合」が起きやすい)

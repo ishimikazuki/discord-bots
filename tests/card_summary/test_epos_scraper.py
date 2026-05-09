@@ -4,6 +4,7 @@ The async fetch_month_history is not unit-tested here — it depends on
 Playwright + a live Epos Net session. Run it manually for end-to-end checks.
 """
 from card_summary.epos_scraper import (
+    EposLoginChallengeError,
     _parse_amount,
     _parse_date,
     make_source_id,
@@ -13,6 +14,10 @@ from card_summary.epos_scraper import (
 
 def test_parse_amount_simple():
     assert _parse_amount("1,518円") == 1518
+
+
+def test_login_challenge_error_message_is_actionable():
+    assert "image/puzzle verification" in str(EposLoginChallengeError("image/puzzle verification"))
 
 
 def test_parse_amount_negative():

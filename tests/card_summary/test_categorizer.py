@@ -10,6 +10,15 @@ def test_dict_hit_returns_category_without_calling_llm(tmp_db):
     assert cat.categorize("Amazon.co.jp") == "ネット通販"
     llm.assert_not_called()
 
+def test_dict_hit_normalizes_epos_full_width_merchant(tmp_db):
+    init_db(tmp_db)
+    seed_category_rules(tmp_db, {"AP/サミツト": "食費", "GOOGLE*CLOUD": "サブスク"})
+    llm = Mock(side_effect=AssertionError("LLM must not be called for normalized hit"))
+    cat = Categorizer(tmp_db, llm_fn=llm)
+    assert cat.categorize("ＡＰ／サミツト") == "食費"
+    assert cat.categorize("ＧＯＯＧＬＥ＊ＣＬＯＵＤ ６ＺＰＰＣ６") == "サブスク"
+    llm.assert_not_called()
+
 def test_dict_miss_calls_llm_and_caches(tmp_db):
     init_db(tmp_db)
     seed_category_rules(tmp_db, {})  # empty dict
