@@ -346,6 +346,65 @@ async def test_card_summary_thread_context_is_injected_into_first_codex_turn(
 
 
 @pytest.mark.asyncio
+async def test_continuation_persists_recoverable_pending_prompt_before_codex_runs(
+    bot_module, monkeypatch, tmp_path
+):
+    sessions_path = tmp_path / "sessions-kanojo.json"
+    sessions_path.write_text(json.dumps({
+        "333": {
+            "sessionId": "codex-existing",
+            "agent": "codex",
+            "projectDir": str(tmp_path),
+            "workDir": str(tmp_path),
+            "threadName": "💕 続きテスト",
+            "lastUsed": "2026-05-09T00:00:00+00:00",
+            "messageCount": 1,
+        }
+    }), encoding="utf-8")
+    monkeypatch.setattr(bot_module, "SESSIONS_FILE", sessions_path)
+    monkeypatch.setattr(bot_module, "TypingLoop", NoopTyping)
+
+    channel = SimpleNamespace(id=333, sent=[])
+
+    async def send(content=None, **_kwargs):
+        channel.sent.append(content)
+
+    channel.send = send
+    message = SimpleNamespace(id=444, channel=channel, content="おーい", attachments=[])
+
+    async def fake_save_inbox(*_args, **_kwargs):
+        return []
+
+    async def fake_send_outbox(*_args, **_kwargs):
+        return 0
+
+    async def fake_run_codex(work_dir, prompt, session_id):
+        saved = json.loads(sessions_path.read_text(encoding="utf-8"))
+        pending = saved["333"]
+        assert pending["pending"] is True
+        assert pending["pendingUserText"] == "おーい"
+        assert pending["pendingSourceMessageId"] == "444"
+        assert "おーい" in pending["pendingPrompt"]
+        assert work_dir == str(tmp_path)
+        assert prompt == pending["pendingPrompt"]
+        assert session_id == "codex-existing"
+        return {"text": "いるよ", "sessionId": "codex-existing", "cost": 0, "usage": {}}
+
+    monkeypatch.setattr(bot_module, "save_inbox_attachments", fake_save_inbox)
+    monkeypatch.setattr(bot_module, "send_outbox_files", fake_send_outbox)
+    monkeypatch.setattr(bot_module, "run_codex_code", fake_run_codex)
+
+    await bot_module._handle_thread_message_locked(message)
+
+    saved = json.loads(sessions_path.read_text(encoding="utf-8"))
+    session = saved["333"]
+    assert channel.sent == ["いるよ"]
+    assert session["messageCount"] == 2
+    assert "pending" not in session
+    assert "pendingPrompt" not in session
+
+
+@pytest.mark.asyncio
 async def test_new_session_persists_recoverable_pending_prompt_before_codex_runs(
     bot_module, monkeypatch, tmp_path
 ):
@@ -416,12 +475,12 @@ async def test_recover_pending_session_with_prompt_replays_codex_turn(
     sessions_path = tmp_path / "sessions-kanojo.json"
     sessions_path.write_text(json.dumps({
         "111": {
-            "sessionId": None,
+            "sessionId": "codex-existing",
             "agent": "codex",
             "projectDir": str(tmp_path),
             "workDir": str(tmp_path),
             "threadName": "💕 復旧テスト",
-            "messageCount": 0,
+            "messageCount": 1,
             "pending": True,
             "pendingPrompt": "[ユーザーの依頼]\n復旧して",
         }
@@ -443,7 +502,7 @@ async def test_recover_pending_session_with_prompt_replays_codex_turn(
     async def fake_run_codex(work_dir, prompt, session_id):
         assert work_dir == str(tmp_path)
         assert prompt == "[ユーザーの依頼]\n復旧して"
-        assert session_id is None
+        assert session_id == "codex-existing"
         return {"text": "復旧したよ", "sessionId": "codex-recovered", "cost": 0, "usage": {}}
 
     async def fake_send_outbox(*_args, **_kwargs):
@@ -459,7 +518,7 @@ async def test_recover_pending_session_with_prompt_replays_codex_turn(
     session = saved["111"]
     assert channel.sent == ["復旧したよ"]
     assert session["sessionId"] == "codex-recovered"
-    assert session["messageCount"] == 1
+    assert session["messageCount"] == 2
     assert "pending" not in session
     assert "pendingPrompt" not in session
 

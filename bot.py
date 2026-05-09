@@ -881,6 +881,13 @@ async def _handle_thread_message_locked(message: discord.Message) -> None:
 
     prompt = build_prompt_with_inbox(user_text, saved_inbox)
 
+    session["pending"] = True
+    session["pendingPrompt"] = prompt
+    session["pendingStartedAt"] = now_iso()
+    session["pendingUserText"] = user_text
+    session["pendingSourceMessageId"] = str(message.id) if getattr(message, "id", None) else None
+    save_sessions(sessions)
+
     typing = TypingLoop(message.channel)
     typing.start()
 
@@ -897,6 +904,7 @@ async def _handle_thread_message_locked(message: discord.Message) -> None:
         session["agent"] = CODEX_AGENT_NAME
         session["lastUsed"] = now_iso()
         session["messageCount"] += 1
+        clear_pending_fields(session)
         save_sessions(sessions)
 
         await send_long_message(message.channel, result["text"])
@@ -910,8 +918,16 @@ async def _handle_thread_message_locked(message: discord.Message) -> None:
         typing.stop()
         err_msg = str(e)[:300]
         print(f"[cont] Error: {e}", file=sys.stderr)
+        sessions = load_sessions()
+        session = sessions.get(str(message.channel.id))
+        thread_name = session.get("threadName", "?") if session else "?"
+        if session:
+            clear_pending_fields(session)
+            session["lastError"] = err_msg
+            session["lastUsed"] = now_iso()
+            save_sessions(sessions)
         await message.channel.send(f"❌ Error: {err_msg}")
-        await notify(f"❌ [{PROJECT_DISPLAY}] Error in **{session['threadName']}**: {err_msg}")
+        await notify(f"❌ [{PROJECT_DISPLAY}] Error in **{thread_name}**: {err_msg}")
 
 
 # ---------------------------------------------------------------------------
@@ -949,8 +965,6 @@ async def _fetch_messageable_channel(channel_id: int):
 async def _recover_pending_session(thread_id: str, session: dict) -> None:
     if session.get("agent") != CODEX_AGENT_NAME or not session.get("pending"):
         return
-    if session.get("sessionId"):
-        return
 
     channel = await _fetch_messageable_channel(int(thread_id))
     if channel is None:
@@ -976,7 +990,7 @@ async def _recover_pending_session(thread_id: str, session: dict) -> None:
     typing = TypingLoop(channel)
     typing.start()
     try:
-        result = await run_codex_code(work_dir, prompt, None)
+        result = await run_codex_code(work_dir, prompt, session.get("sessionId"))
         typing.stop()
 
         sessions = load_sessions()
