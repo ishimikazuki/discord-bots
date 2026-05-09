@@ -38,6 +38,20 @@
 - merchant フィールドは「国内加盟店ショッピング」等の汎用文言のみ (具体加盟店名なし)
 - 正規表現を新フォーマットに対応、フィクスチャも実メール準拠に redact 済み
 
+### エポスNet scheduler 統合 (`2026-05-09`)
+- macmini に Playwright 1.59.0 + Chromium をインストール
+- `card_summary/scheduler.py` に 03:00 JST の daily reconciliation loop を追加
+  - 既存の 7:00 / 15:00 / 22:00 投稿 slot loop は維持
+  - `run_reconciliation()` が当月 + 前月の 2 ヶ月分を `epos_scraper.fetch_month_history()` で取得
+  - `Categorizer` でカテゴリ付与後、`store.upsert_transactions()` に投入
+  - 失敗時は exception log のみで loop 継続
+- `tests/card_summary/test_scheduler_recon.py` を追加
+  - `_next_recon_run()` の 03:00 計算
+  - mocked fetcher が当月 + 前月で呼ばれ、`AP/サミット` が `食費` として DB に入ることを確認
+- macmini 実行結果:
+  - `pytest tests/card_summary/ -q` → 55 passed
+  - `pytest -q` → 81 passed
+
 ## Discoveries
 
 ### 重要な前提崩壊
@@ -62,6 +76,7 @@
 - `security add-generic-password` は SSH (非 GUI) セッションだと `User interaction is not allowed` で失敗
 - 既存 `bot.py` の `get_from_env_file` を使い `~/discord-bots/.env` への書き込みで回避
 - LaunchAgent (gui/$UID) は keychain アクセス可能 (memory にも記載済み)
+- 2026-05-09 追記: 現在の macmini login keychain では `service=epos-net` も `account=epos-email|epos-pass|epos-cvv` も未検出。CLI と GUI Terminal `.command` 実行の両方で `SecKeychainSearchCopyNext: The specified item could not be found`。selector live DOM 検証は credential 再登録後に再試行する
 
 ### Discord Developer Portal / Google Cloud / エポスNet の browser-use 操作
 - browser-use 独自プロファイルは Chrome の普段ログインを使えない (= かーくん側ブラウザと「タブ競合」が起きやすい)
@@ -80,9 +95,9 @@
 
 1. `card_summary/epos_scraper.py` 新規実装 (Playwright + keychain ID/Pass/CVV)
 2. cookie 永続化 (CVV プロンプト回避)
-3. `card_summary/scheduler.py` を Gmail fetch から エポスNet scrape に差し替え
+3. `card_summary/scheduler.py` を Gmail fetch から エポスNet scrape に差し替え (03:00 reconciliation loop として完了。Gmail slot fetch は legacy/併用として維持)
 4. `CATEGORY_SEED` を実加盟店向けに更新 (GOOGLE→サブスク、UBER→食費、SUMITOMO/サミット→食費 等)
-5. macmini に Playwright + chromium インストール
+5. macmini に Playwright + chromium インストール (完了)
 6. データダウンロード CSV 取得が可能か検証 (HTML scraping より安定)
 7. (optional) keychain への kanojo token 移行 (.env から)
 

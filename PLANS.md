@@ -15,9 +15,9 @@
 - [x] CATEGORY_SEED を実加盟店向けに更新
 - [x] `get_category_for` を LENGTH 降順 lookup に修正 (具体的 pattern が generic を上書き)
 - [x] `tests/card_summary/test_epos_scraper.py` ユニット 10 件追加 (78 pass)
-- [ ] macmini で `pip install -r requirements.txt && playwright install chromium`
+- [x] macmini で `pip install -r requirements.txt && playwright install chromium`
 - [ ] selector を実 DOM で verify (`headless=False` + 月選択挙動)
-- [ ] `card_summary/scheduler.py` に epos_scraper 統合 (1日1回 深夜呼び出し)
+- [x] `card_summary/scheduler.py` に epos_scraper 統合 (1日1回 深夜 3:00 呼び出し)
 - [ ] (optional) keychain へ kanojo bot token 移行 (.env から)
 
 ## 発見・予想外のこと
@@ -26,6 +26,7 @@
 - 2026-05-08: kanojo Discord application は存在しない、実体は reserved-bot application の bot user 名 = kanojo#3813
 - 2026-05-08: SSH 経由の `security add-generic-password` は user-interaction-required で失敗、`.env` で代替
 - 2026-05-09: エポスNet 月別ご利用履歴照会で加盟店名・金額・日付の完全明細取得可能と判明、設計ピボット決定
+- 2026-05-09: macmini 現在ユーザーの login keychain には `service=epos-net` / `account=epos-email|epos-pass|epos-cvv` が見つからない。GUI Terminal 経由でも `SecKeychainSearchCopyNext: The specified item could not be found`。live DOM 検証は credential 再登録後に再実行が必要
 
 ## 決定したこと
 - 2026-05-07: spec § 10 の bot.py mention 緩和は不要、既存 `is_thread + is_our_channel` 経路 + context-file 注入で要件達成
@@ -37,4 +38,5 @@
 - plan: `docs/superpowers/plans/2026-05-07-card-summary-bot-plan.md`
 - 完了タスク詳細: `PROJECT_LOG/issue-0003-2026-05-07-card-summary-bot.md`
 - エポスNet 月別ご利用履歴照会 URL: `/memberservice/pc/usehistoryreference/use_history_preload.do`
-- keychain 登録済み: `epos-email` / `epos-pass` / `epos-cvv` (service=`epos-net`), `kanojo-bot-token` は macmini の .env のみ
+- keychain 期待値: `epos-email` / `epos-pass` / `epos-cvv` (service=`epos-net`)。2026-05-09 時点の macmini login keychain では未検出
+- `kanojo-bot-token` は macmini の .env のみ

@@ -2,6 +2,7 @@
 from __future__ import annotations
 import asyncio
 import logging
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -14,6 +15,7 @@ from card_summary.store import (
 )
 from card_summary.parser import parse_epos_email, ParseError
 from card_summary.categorizer import Categorizer
+from card_summary.epos_scraper import fetch_month_history
 from card_summary.analyzer import compute_report, has_changed
 from card_summary.formatter import format_report
 
@@ -24,6 +26,7 @@ FetchFn = Callable[..., Awaitable[list[tuple[str, str]]]]   # async fetch_new(si
 LlmFn = Callable[[str], str]
 PostFn = Callable[[str, str], Awaitable["object"]]          # async (thread_name, body) -> Thread
 RegisterFn = Callable[["object", str, str], Awaitable[None]]  # async (thread, slot, summary_text)
+EposFetchFn = Callable[[int, int], Awaitable[list]]
 
 async def run_slot(
     *,
@@ -107,20 +110,68 @@ def _next_slot_to_run() -> tuple[str, datetime]:
     return (first_slot, tomorrow.replace(hour=SLOTS[first_slot], minute=0, second=0, microsecond=0))
 
 
+def _next_recon_run(now: datetime | None = None) -> datetime:
+    """Return the next daily Epos reconciliation time (03:00 local/JST)."""
+    now = now or datetime.now()
+    candidate = now.replace(hour=3, minute=0, second=0, microsecond=0)
+    if candidate > now:
+        return candidate
+    return candidate + timedelta(days=1)
+
+
+def _current_and_previous_months(now: datetime | None = None) -> list[tuple[int, int]]:
+    """Return [(current_year, current_month), (prev_year, prev_month)]."""
+    now = now or datetime.now()
+    current = (now.year, now.month)
+    first_this_month = now.replace(day=1)
+    prev_day = first_this_month - timedelta(days=1)
+    previous = (prev_day.year, prev_day.month)
+    return [current, previous]
+
+
 def _seconds_until(target: datetime) -> float:
     return max(0.0, (target - datetime.now()).total_seconds())
 
 
-async def start_scheduler(
+async def run_reconciliation(
+    *,
+    db_path: Path = DB_PATH,
+    llm_fn: LlmFn,
+    fetcher: EposFetchFn = fetch_month_history,
+    now: datetime | None = None,
+) -> int:
+    """Fetch current and previous Epos months, categorize, and upsert rows."""
+    init_db(db_path)
+    seed_category_rules(db_path, CATEGORY_SEED)
+
+    categorizer = Categorizer(db_path, llm_fn=llm_fn)
+    categorized = []
+    for year, month in _current_and_previous_months(now):
+        log.info("reconciliation: fetching epos history year=%04d month=%02d", year, month)
+        txs = await fetcher(year, month)
+        for tx in txs:
+            category = categorizer.categorize(tx.merchant)
+            categorized.append(replace(tx, category=category))
+
+    inserted = upsert_transactions(db_path, categorized)
+    set_fetch_checkpoint(db_path, "epos_net", (now or datetime.now()).isoformat())
+    log.info(
+        "reconciliation complete: fetched=%d inserted=%d",
+        len(categorized),
+        inserted,
+    )
+    return inserted
+
+
+async def _run_slot_loop(
     *,
     fetch_new: FetchFn,
     llm_fn: LlmFn,
     post_to_forum: PostFn,
     register_session: RegisterFn,
-    db_path: Path = DB_PATH,
+    db_path: Path,
 ) -> None:
-    """Long-running daily loop. Sleeps until next slot, runs it, repeats."""
-    log.info("scheduler started")
+    """Long-running daily summary loop. Sleeps until next slot, runs it, repeats."""
     while True:
         slot, next_dt = _next_slot_to_run()
         delay = _seconds_until(next_dt)
@@ -128,7 +179,7 @@ async def start_scheduler(
         try:
             await asyncio.sleep(delay)
         except asyncio.CancelledError:
-            log.info("scheduler cancelled")
+            log.info("scheduler slot loop cancelled")
             return
         try:
             await run_slot(
@@ -139,6 +190,50 @@ async def start_scheduler(
         except Exception:
             log.exception("run_slot crashed for slot=%s", slot)
             await asyncio.sleep(60)  # avoid tight retry loop on persistent failure
+
+
+async def _run_reconciliation_loop(
+    *,
+    db_path: Path,
+    llm_fn: LlmFn,
+) -> None:
+    """Long-running Epos reconciliation loop. Runs once per day at 03:00."""
+    while True:
+        next_dt = _next_recon_run()
+        delay = _seconds_until(next_dt)
+        log.info("scheduler: next reconciliation in %.0fs (%s)", delay, next_dt.isoformat())
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            log.info("scheduler reconciliation loop cancelled")
+            return
+        try:
+            await run_reconciliation(db_path=db_path, llm_fn=llm_fn)
+        except Exception:
+            log.exception("reconciliation crashed")
+            await asyncio.sleep(60)  # avoid tight retry loop on persistent failure
+
+
+async def start_scheduler(
+    *,
+    fetch_new: FetchFn,
+    llm_fn: LlmFn,
+    post_to_forum: PostFn,
+    register_session: RegisterFn,
+    db_path: Path = DB_PATH,
+) -> None:
+    """Long-running scheduler. Runs posting slots and Epos reconciliation."""
+    log.info("scheduler started")
+    await asyncio.gather(
+        _run_slot_loop(
+            fetch_new=fetch_new,
+            llm_fn=llm_fn,
+            post_to_forum=post_to_forum,
+            register_session=register_session,
+            db_path=db_path,
+        ),
+        _run_reconciliation_loop(db_path=db_path, llm_fn=llm_fn),
+    )
 
 import json as _json
 
