@@ -4,6 +4,7 @@
 - Fixed card_summary live Epos reconciliation when Playwright is rejected by Epos Net's session trust checks.
 - Added a Google Chrome + AppleScript fallback that uses the already trusted macmini Chrome profile.
 - Fixed `source_id` generation so new Epos rows inserted earlier in a month do not shift IDs for existing rows.
+- Superseded on 2026-05-10 by issue-0008: trusted Chrome is now the default path, not a fallback.
 
 ## Changes
 - `card_summary/epos_scraper.py`

@@ -1,14 +1,17 @@
 """Unit tests for the pure parsers in card_summary.epos_scraper.
 
-The async fetch_month_history is not unit-tested here — it depends on
-Playwright + a live Epos Net session. Run it manually for end-to-end checks.
+The live Chrome scrape needs the user's trusted Epos Net session, so most tests
+patch the AppleScript boundary and keep browser automation out of unit tests.
 """
+import pytest
+
 from card_summary.epos_scraper import (
     EposLoginChallengeError,
     _parse_amount,
     _parse_chrome_history_payload,
     _fetch_month_history_with_chrome_apple_events,
     _parse_date,
+    fetch_month_history,
     make_source_id,
     rows_to_transactions,
 )
@@ -168,3 +171,25 @@ def test_chrome_apple_events_fetch_uses_keychain_and_payload(monkeypatch):
     assert seen_accounts == ["epos-email", "epos-pass", "epos-cvv"]
     assert len(txs) == 1
     assert txs[0].amount == 37
+
+
+@pytest.mark.asyncio
+async def test_fetch_month_history_uses_trusted_chrome_by_default(monkeypatch):
+    import card_summary.epos_scraper as epos_scraper
+
+    called = []
+
+    def fake_chrome_fetch(year, month):
+        called.append((year, month))
+        return []
+
+    monkeypatch.setattr(
+        epos_scraper,
+        "_fetch_month_history_with_chrome_apple_events",
+        fake_chrome_fetch,
+    )
+
+    txs = await fetch_month_history(2026, 5)
+
+    assert txs == []
+    assert called == [(2026, 5)]

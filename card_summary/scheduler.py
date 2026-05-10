@@ -36,14 +36,24 @@ async def run_slot(
     llm_fn: LlmFn,
     post_to_forum: PostFn,
     register_session: RegisterFn,
+    epos_fetcher: EposFetchFn | None = fetch_month_history,
 ) -> None:
-    """One bath cycle for a slot. Idempotent and safe to retry."""
+    """One batch cycle for a slot. Idempotent and safe to retry."""
     init_db(db_path)
     seed_category_rules(db_path, CATEGORY_SEED)
 
     today = datetime.now()
 
-    # 1. fetch new mails
+    # 1. Refresh Epos Net through the trusted Chrome profile before computing the summary.
+    if epos_fetcher is not None:
+        await run_reconciliation(
+            db_path=db_path,
+            llm_fn=llm_fn,
+            fetcher=epos_fetcher,
+            now=today,
+        )
+
+    # 2. Fetch legacy Epos emails. This is non-fatal; Epos Net is the canonical source.
     since = get_fetch_checkpoint(db_path, "gmail")
     log.info("[%s] fetch since=%s", slot, since)
     try:
@@ -52,7 +62,7 @@ async def run_slot(
         log.exception("[%s] gmail fetch failed; continuing with stored transactions", slot)
         raw_mails = []
 
-    # 2. parse + categorize + store
+    # 3. Parse + categorize + store legacy mail transactions.
     categorizer = Categorizer(db_path, llm_fn=llm_fn)
     txs = []
     for msg_id, body in raw_mails:
@@ -63,23 +73,22 @@ async def run_slot(
             continue
         category = categorizer.categorize(tx.merchant)
         # rebuild Transaction with category set (frozen dataclass, so use replace)
-        from dataclasses import replace
         txs.append(replace(tx, category=category))
     upsert_transactions(db_path, txs)
     if raw_mails:
         set_fetch_checkpoint(db_path, "gmail", today.isoformat())
 
-    # 3. compute report
+    # 4. Compute report.
     prev = get_summary_state(db_path, slot)
     since_max_id = prev["last_max_tx_id"] if prev else 0
     report = compute_report(db_path, today=today, since_max_id=since_max_id)
 
-    # 4. has_changed?
+    # 5. Notify only when total, breakdown, max transaction id, or alerts changed.
     if not has_changed(prev, report):
         log.info("[%s] no change — silent", slot)
         return
 
-    # 5. post and register
+    # 6. Post and register the thread context for follow-up questions.
     text = format_report(report, slot=slot)
     label = {"morning": "7:00", "afternoon": "15:00", "night": "22:00"}[slot]
     thread_name = f"🔔 {today.month}/{today.day} {label}"
@@ -197,6 +206,7 @@ async def _run_slot_loop(
     post_to_forum: PostFn,
     register_session: RegisterFn,
     db_path: Path,
+    epos_fetcher: EposFetchFn | None = fetch_month_history,
 ) -> None:
     """Long-running daily summary loop. Sleeps until next slot, runs it, repeats."""
     while True:
@@ -213,6 +223,7 @@ async def _run_slot_loop(
                 slot=slot, db_path=db_path,
                 fetch_new=fetch_new, llm_fn=llm_fn,
                 post_to_forum=post_to_forum, register_session=register_session,
+                epos_fetcher=epos_fetcher,
             )
         except Exception:
             log.exception("run_slot crashed for slot=%s", slot)
@@ -224,7 +235,11 @@ async def _run_reconciliation_loop(
     db_path: Path,
     llm_fn: LlmFn,
 ) -> None:
-    """Long-running Epos reconciliation loop. Runs once per day at 03:00."""
+    """Legacy/manual Epos reconciliation loop.
+
+    The live scheduler refreshes Epos Net at every 7:00/15:00/22:00 slot, so
+    this loop is intentionally not started by default.
+    """
     if not _checkpoint_is_today(get_fetch_checkpoint(db_path, "epos_net")):
         log.info("scheduler: startup reconciliation is due")
         try:
@@ -255,18 +270,17 @@ async def start_scheduler(
     post_to_forum: PostFn,
     register_session: RegisterFn,
     db_path: Path = DB_PATH,
+    epos_fetcher: EposFetchFn | None = fetch_month_history,
 ) -> None:
-    """Long-running scheduler. Runs posting slots and Epos reconciliation."""
+    """Long-running scheduler. Runs the three daily posting/check slots."""
     log.info("scheduler started")
-    await asyncio.gather(
-        _run_slot_loop(
-            fetch_new=fetch_new,
-            llm_fn=llm_fn,
-            post_to_forum=post_to_forum,
-            register_session=register_session,
-            db_path=db_path,
-        ),
-        _run_reconciliation_loop(db_path=db_path, llm_fn=llm_fn),
+    await _run_slot_loop(
+        fetch_new=fetch_new,
+        llm_fn=llm_fn,
+        post_to_forum=post_to_forum,
+        register_session=register_session,
+        db_path=db_path,
+        epos_fetcher=epos_fetcher,
     )
 
 import json as _json

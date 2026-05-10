@@ -6,3 +6,4 @@
 - issue-0005-2026-05-09-codex-migration.md — Discord Bot のAI実行基盤を Codex CLI へ移行
 - issue-0006-2026-05-09-codex-migration-verification.md — Codex移行後のカード要約・予定調整・過去スレッド再現テスト
 - issue-0007-2026-05-09-epos-chrome-fallback.md — Epos Net の信頼済み Chrome fallback とカード明細重複 ID 修正
+- issue-0008-2026-05-10-card-summary-chrome-default.md — カード要約を信頼済み Chrome default + 7/15/22 各スロット確認へ修正

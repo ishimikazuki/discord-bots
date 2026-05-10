@@ -1,24 +1,23 @@
 """Scrape Epos Net 月別ご利用履歴照会 for transaction data.
 
 Login flow:
-  1. POST id/password to login_preload.do
-  2. (occasionally) ご本人様確認: enter 3-digit CVV via on-screen keypad
-  3. GET use_history_preload.do, optionally select year/month, parse table
+  1. Open Epos Net in the user's trusted Google Chrome profile.
+  2. POST id/password to login_preload.do when the session is not already trusted.
+  3. (occasionally) ご本人様確認: enter 3-digit CVV via on-screen keypad.
+  4. GET use_history_preload.do, select year/month, parse table.
 
 Credentials come from macOS keychain (account=epos-email|epos-pass|epos-cvv,
-service=epos-net). Cookie state is persisted to data/epos_storage_state.json
-so subsequent runs can skip the CVV prompt when Epos Net trusts the device.
+service=epos-net). We intentionally use the existing Chrome profile instead of
+a fresh automation browser because Epos Net challenges untrusted sessions.
 """
 from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import re
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from card_summary.store import Transaction
 
 log = logging.getLogger(__name__)
@@ -26,9 +25,6 @@ log = logging.getLogger(__name__)
 EPOS_LOGIN_URL = "https://www.eposcard.co.jp/memberservice/pc/login/login_preload.do"
 EPOS_HISTORY_URL = (
     "https://www.eposcard.co.jp/memberservice/pc/usehistoryreference/use_history_preload.do"
-)
-STORAGE_STATE_PATH = (
-    Path(__file__).resolve().parent.parent / "data" / "epos_storage_state.json"
 )
 
 
@@ -247,12 +243,20 @@ def _build_chrome_history_script(*, year: int, month: int, email: str, password:
   const yearSelect = form.querySelector("select[name='monthSelectTagsDateYear']");
   const monthSelect = form.querySelector("select[name='monthSelectTagsDateMonth']");
   if (!yearSelect || !monthSelect) return JSON.stringify({{ok:false, reason:'history selects missing'}});
-  yearSelect.value = {json.dumps(str(year))};
-  monthSelect.value = {json.dumps(f"{month:02d}")};
-  yearSelect.dispatchEvent(new Event('change', {{bubbles:true}}));
+  const targetYear = {json.dumps(str(year))};
+  const targetMonth = {json.dumps(f"{month:02d}")};
+  if (yearSelect.value === targetYear && monthSelect.value === targetMonth) {{
+    return JSON.stringify({{ok:true, action:'history-month-already-selected', year:yearSelect.value, month:monthSelect.value}});
+  }}
+  yearSelect.value = targetYear;
+  monthSelect.value = targetMonth;
+  if (yearSelect.value !== targetYear || monthSelect.value !== targetMonth) {{
+    return JSON.stringify({{ok:false, reason:'target month option missing', year:targetYear, month:targetMonth}});
+  }}
+  yearSelect.dispatchEvent(new Event('input', {{bubbles:true}}));
+  monthSelect.dispatchEvent(new Event('input', {{bubbles:true}}));
   monthSelect.dispatchEvent(new Event('change', {{bubbles:true}}));
-  form.submit();
-  return JSON.stringify({{ok:true, action:'submitted-history-month', year:yearSelect.value, month:monthSelect.value}});
+  return JSON.stringify({{ok:true, action:'selected-history-month', year:yearSelect.value, month:monthSelect.value}});
 }})()
 """
     extract_js = """
@@ -262,11 +266,10 @@ def _build_chrome_history_script(*, year: int, month: int, email: str, password:
     return JSON.stringify({ok:false, reason:'login session rejected by Epos Net'});
   }
   const rows = [];
-  for (const table of Array.from(document.querySelectorAll('table'))) {
-    if (!table.innerText.includes('ご利用場所') || !table.innerText.includes('ご利用金額')) continue;
-    for (const tr of Array.from(table.querySelectorAll('tr'))) {
-      const cells = Array.from(tr.querySelectorAll('td')).map(td => td.innerText.trim());
-      if (cells.length >= 4 && /^\\d{4}\\/\\d{1,2}\\/\\d{1,2}$/.test(cells[0])) rows.push(cells);
+  for (const tr of Array.from(document.querySelectorAll('tr'))) {
+    const cells = Array.from(tr.querySelectorAll('td')).map(td => td.innerText.trim());
+    if (cells.length >= 4 && /^\\d{4}\\/\\d{1,2}\\/\\d{1,2}$/.test(cells[0])) {
+      rows.push(cells);
     }
   }
   if (!rows.length && !body.includes('ご利用履歴はございません')) {
@@ -346,107 +349,13 @@ def _fetch_month_history_with_chrome_apple_events(year: int, month: int) -> list
 
 
 async def fetch_month_history(year: int, month: int, *, headless: bool = True) -> list[Transaction]:
-    """Login to Epos Net, navigate to 月別ご利用履歴照会, and return scraped Transactions.
+    """Return Epos Net 月別ご利用履歴 through the trusted Chrome profile.
 
-    Selectors below were captured from the live page on 2026-05-09 and may need
-    adjustment if Epos Net changes its DOM. Run with `headless=False` for visual
-    debugging.
+    `headless` is accepted for backwards compatibility with older callers, but
+    ignored: this path deliberately uses the user's normal Chrome profile so
+    Epos Net sees the same trusted session the user already uses.
     """
-    from playwright.async_api import async_playwright  # lazy: optional dep
+    del headless
+    import asyncio
 
-    email = get_credential("epos-email")
-    password = get_credential("epos-pass")
-    cvv = get_credential("epos-cvv")
-
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=headless)
-            try:
-                ctx_kwargs: dict = {}
-                if STORAGE_STATE_PATH.exists():
-                    ctx_kwargs["storage_state"] = str(STORAGE_STATE_PATH)
-                context = await browser.new_context(**ctx_kwargs)
-                page = await context.new_page()
-
-                await page.goto(EPOS_LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
-
-                # Step 1: ID / password (skipped when storage_state already authenticated)
-                login_id = page.locator("input[name='loginId'], input[id*='loginId'], input[id='userid']")
-                if await login_id.count() > 0 and await login_id.first.is_visible():
-                    await login_id.first.fill(email)
-                    await page.locator(
-                        "input[name='passWord'], input[id='passWord'], input[name='loginPassword'], input[type='password']"
-                    ).first.fill(password)
-                    await page.locator("button:has-text('ログイン'), input[value='ログイン']").first.click()
-                    await page.wait_for_load_state("domcontentloaded", timeout=60000)
-
-                body_text = await page.locator("body").inner_text(timeout=10000)
-                if "画像認証" in body_text or "パズルを完成" in body_text:
-                    raise EposLoginChallengeError(
-                        "Epos Net requested image/puzzle verification; complete login in a trusted Chrome profile first"
-                    )
-
-                # Step 2 (optional): ご本人様確認 — 3-digit CVV via on-screen keypad
-                if await page.locator("text=ご本人様確認").count() > 0:
-                    log.info("CVV prompt detected; entering security code via keypad")
-                    for digit in cvv:
-                        await page.locator(f"button:has-text('{digit}')").first.click()
-                    await page.locator(
-                        "button:has-text('次へ'), input[value='次へ']"
-                    ).first.click()
-                    await page.wait_for_load_state("domcontentloaded", timeout=60000)
-
-                # Step 3: 月別ご利用履歴照会
-                await page.goto(EPOS_HISTORY_URL, wait_until="domcontentloaded", timeout=60000)
-                history_text = await page.locator("body").inner_text(timeout=10000)
-                if "通信エラーが発生しました" in history_text or "もう一度ログイン" in history_text:
-                    raise EposLoginChallengeError(
-                        "Epos Net did not preserve the login session; refresh storage_state in a trusted browser"
-                    )
-                try:
-                    await page.locator("select").first.wait_for(timeout=5000)
-                    year_select = page.locator("select[name='monthSelectTagsDateYear']")
-                    month_select = page.locator("select[name='monthSelectTagsDateMonth']")
-                    if await year_select.count() == 0:
-                        year_select = page.locator("select").nth(0)
-                    if await month_select.count() == 0:
-                        month_select = page.locator("select").nth(1)
-                    await year_select.select_option(str(year))
-                    await month_select.select_option(f"{month:02d}")
-                    await page.evaluate(
-                        """() => {
-                            const form = document.forms['useHistoryPForm']
-                                || document.querySelector("form[action*='use_history_dispatch']");
-                            if (form) form.submit();
-                        }"""
-                    )
-                    await page.wait_for_load_state("domcontentloaded", timeout=60000)
-                    submit = page.locator("button:has-text('照会'), input[value='照会']")
-                    if await submit.count() > 0:
-                        await submit.first.click()
-                        await page.wait_for_load_state("domcontentloaded", timeout=60000)
-                except Exception as e:  # noqa: BLE001 — page layout drift is expected
-                    log.warning("year/month selection failed (%s); continuing with default view", e)
-
-                rows: list[list[str]] = await page.evaluate(
-                    """() => Array.from(document.querySelectorAll('table tbody tr'))
-                        .map(tr => Array.from(tr.querySelectorAll('td')).map(td => td.innerText.trim()))"""
-                )
-                if not rows and await page.locator("select").count() == 0:
-                    raise EposLoginChallengeError(
-                        "Epos Net history page did not expose expected controls or rows"
-                    )
-
-                # Persist cookies / storage so future runs can skip CVV prompt
-                STORAGE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-                await context.storage_state(path=str(STORAGE_STATE_PATH))
-            finally:
-                await browser.close()
-
-        return rows_to_transactions(rows)
-    except EposLoginChallengeError:
-        if os.getenv("EPOS_DISABLE_CHROME_APPLESCRIPT_FALLBACK") == "1":
-            raise
-        log.info("Playwright Epos scrape was challenged; retrying with trusted Chrome AppleScript")
-        import asyncio
-        return await asyncio.to_thread(_fetch_month_history_with_chrome_apple_events, year, month)
+    return await asyncio.to_thread(_fetch_month_history_with_chrome_apple_events, year, month)
