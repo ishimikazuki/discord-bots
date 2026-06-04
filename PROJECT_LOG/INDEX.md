@@ -1,9 +1,11 @@
 # PROJECT_LOG INDEX
 
+- issue-0009-2026-05-31-macmini-discord-bot-recovery.md — Mac mini 再起動後の GUI 未ログインによる Discord bot 停止を SSH で調査・手動復旧
+- issue-0008-2026-05-10-card-summary-chrome-default.md — カード要約を信頼済み Chrome default + 7/15/22 各スロット確認へ修正
+- issue-0007-2026-05-09-epos-chrome-fallback.md — Epos Net の信頼済み Chrome fallback とカード明細重複 ID 修正
+- issue-0006-2026-05-09-codex-migration-verification.md — Codex移行後のカード要約・予定調整・過去スレッド再現テスト
+- issue-0005-2026-05-09-codex-migration.md — Discord Bot のAI実行基盤を Codex CLI へ移行
+- issue-0004-2026-05-09-general-bot-duplicate-runs.md — General Bot の Claude Code 多重実行・重複返信を修正
+- issue-0003-2026-05-07-card-summary-bot.md — エポスカード利用サマリーBot (kanojo) 実装とエポスNet スクレイピング方針へのピボット
 - issue-0002-2026-04-23-file-transfer.md — Discord ファイル送受信（_inbox / _outbox 規約、案A 最小実装）
 - issue-0001-2026-04-22-role-mention-launchagent.md — ロールメンション対応 + LaunchAgent 常駐化（keychain access 解決）
-- issue-0004-2026-05-09-general-bot-duplicate-runs.md — General Bot の Claude Code 多重実行・重複返信を修正
-- issue-0005-2026-05-09-codex-migration.md — Discord Bot のAI実行基盤を Codex CLI へ移行
-- issue-0006-2026-05-09-codex-migration-verification.md — Codex移行後のカード要約・予定調整・過去スレッド再現テスト
-- issue-0007-2026-05-09-epos-chrome-fallback.md — Epos Net の信頼済み Chrome fallback とカード明細重複 ID 修正
-- issue-0008-2026-05-10-card-summary-chrome-default.md — カード要約を信頼済み Chrome default + 7/15/22 各スロット確認へ修正
