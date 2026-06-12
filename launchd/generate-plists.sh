@@ -3,14 +3,16 @@
 # Idempotent: overwrites existing plists.
 #
 # Env vars (all optional):
-#   OUT_DIR         target dir (default: $HOME/Library/LaunchAgents)
-#   USER_OVERRIDE   label prefix user (default: $(whoami))
-#   HOME_OVERRIDE   base home dir (default: $HOME)
+#   OUT_DIR                    target dir (default: $HOME/Library/LaunchAgents)
+#   USER_OVERRIDE              label prefix user (default: $(whoami))
+#   HOME_OVERRIDE              base home dir (default: $HOME)
+#   LIMIT_LOAD_TO_SESSION_TYPE "Background" for headless user launchd, otherwise unset
 set -euo pipefail
 
 OUT_DIR="${OUT_DIR:-$HOME/Library/LaunchAgents}"
 USER_NAME="${USER_OVERRIDE:-$(whoami)}"
 HOME_DIR="${HOME_OVERRIDE:-$HOME}"
+LIMIT_LOAD_TO_SESSION_TYPE="${LIMIT_LOAD_TO_SESSION_TYPE:-}"
 PROJECT_DIR="$HOME_DIR/discord-bots"
 CONFIG="$PROJECT_DIR/config.json"
 
@@ -22,6 +24,11 @@ BOTS=$(python3 -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1]))[
 
 for bot in $BOTS; do
   plist="$OUT_DIR/com.$USER_NAME.discord-bot-$bot.plist"
+  session_xml=$'    <key>ProcessType</key>\n    <string>Interactive</string>'
+  if [ -n "$LIMIT_LOAD_TO_SESSION_TYPE" ]; then
+    session_xml="    <key>LimitLoadToSessionType</key>
+    <string>$LIMIT_LOAD_TO_SESSION_TYPE</string>"
+  fi
   cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -57,8 +64,7 @@ for bot in $BOTS; do
     </dict>
     <key>ThrottleInterval</key>
     <integer>10</integer>
-    <key>ProcessType</key>
-    <string>Interactive</string>
+$session_xml
 </dict>
 </plist>
 EOF

@@ -29,7 +29,15 @@ with open("'"$TMPDIR_HOME/discord-bots/config.json"'") as f:
   grep -q "$TMPDIR_HOME/.npm-global/bin" "$plist" || { echo "FAIL: PATH missing npm-global for $bot"; exit 1; }
   grep -q "<key>KeepAlive</key>" "$plist" || { echo "FAIL: KeepAlive missing for $bot"; exit 1; }
   grep -q "<key>RunAtLoad</key>" "$plist" || { echo "FAIL: RunAtLoad missing for $bot"; exit 1; }
+  grep -q "<key>ProcessType</key>" "$plist" || { echo "FAIL: ProcessType missing for $bot"; exit 1; }
 done
+
+OUT_DIR="$TMPDIR_OUT/background" HOME_OVERRIDE="$TMPDIR_HOME" USER_OVERRIDE=testuser LIMIT_LOAD_TO_SESSION_TYPE=Background \
+  bash "$SCRIPT"
+bg_plist="$TMPDIR_OUT/background/com.testuser.discord-bot-general.plist"
+grep -q "<key>LimitLoadToSessionType</key>" "$bg_plist" || { echo "FAIL: background session key missing"; exit 1; }
+grep -q "<string>Background</string>" "$bg_plist" || { echo "FAIL: background session value missing"; exit 1; }
+! grep -q "<key>ProcessType</key>" "$bg_plist" || { echo "FAIL: background plist should not use ProcessType"; exit 1; }
 
 # Sanity: at least 4 bots (general, kb, reserved, yumekano-coe)
 count=$(ls "$TMPDIR_OUT"/com.testuser.discord-bot-*.plist | wc -l | tr -d ' ')

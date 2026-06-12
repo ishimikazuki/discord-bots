@@ -1,9 +1,10 @@
 #!/bin/bash
-# Install Discord bots as LaunchAgents (user scope, GUI session so keychain works).
+# Install Discord bots as LaunchAgents.
 # Idempotent: can be re-run after updates.
 #
 # Env vars:
-#   DRY_RUN=1  print what would happen, don't touch launchd
+#   DRY_RUN=1                  print what would happen, don't touch launchd
+#   LAUNCHD_TARGET_DOMAIN=...  override launchctl target, e.g. gui/501 or user/501
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,6 +13,20 @@ USER_NAME="$(whoami)"
 UID_NUM="$(id -u)"
 AGENTS_DIR="$HOME/Library/LaunchAgents"
 CONFIG="$PROJECT_DIR/config.json"
+CONSOLE_USER="$(stat -f '%Su' /dev/console 2>/dev/null || true)"
+
+if [ -n "${LAUNCHD_TARGET_DOMAIN:-}" ]; then
+  TARGET_DOMAIN="$LAUNCHD_TARGET_DOMAIN"
+elif [ "$CONSOLE_USER" = "$USER_NAME" ]; then
+  TARGET_DOMAIN="gui/$UID_NUM"
+else
+  TARGET_DOMAIN="user/$UID_NUM"
+fi
+
+LIMIT_LOAD_TO_SESSION_TYPE=""
+if [[ "$TARGET_DOMAIN" == user/* ]]; then
+  LIMIT_LOAD_TO_SESSION_TYPE="Background"
+fi
 
 test -f "$CONFIG" || { echo "config.json not found at $CONFIG" >&2; exit 1; }
 
@@ -58,10 +73,12 @@ fi
 
 echo ">>> 2. plist を生成（全 bot）"
 if [ "${DRY_RUN:-}" = "1" ]; then
-  echo "would run: OUT_DIR=$AGENTS_DIR bash $SCRIPT_DIR/generate-plists.sh"
+  echo "target domain: $TARGET_DOMAIN"
+  echo "limit load session type: ${LIMIT_LOAD_TO_SESSION_TYPE:-default}"
+  echo "would run: OUT_DIR=$AGENTS_DIR LIMIT_LOAD_TO_SESSION_TYPE=${LIMIT_LOAD_TO_SESSION_TYPE:-} bash $SCRIPT_DIR/generate-plists.sh"
   echo "  (would write one plist per bot: $BOTS)"
 else
-  OUT_DIR="$AGENTS_DIR" bash "$SCRIPT_DIR/generate-plists.sh"
+  OUT_DIR="$AGENTS_DIR" LIMIT_LOAD_TO_SESSION_TYPE="$LIMIT_LOAD_TO_SESSION_TYPE" bash "$SCRIPT_DIR/generate-plists.sh"
 fi
 
 echo ">>> 3. 既存 LaunchAgent bootout（あれば）"
@@ -77,10 +94,10 @@ legacy_labels=(
 )
 for label in "${legacy_labels[@]}"; do
   if [ "${DRY_RUN:-}" = "1" ]; then
-    echo "would run: launchctl bootout gui/$UID_NUM/$label (if loaded, legacy)"
+    echo "would run: launchctl bootout $TARGET_DOMAIN/$label (if loaded, legacy)"
   else
-    if launchctl print "gui/$UID_NUM/$label" >/dev/null 2>&1; then
-      launchctl bootout "gui/$UID_NUM/$label" 2>/dev/null || true
+    if launchctl print "$TARGET_DOMAIN/$label" >/dev/null 2>&1; then
+      launchctl bootout "$TARGET_DOMAIN/$label" 2>/dev/null || true
       sleep 1
     fi
     rm -f "$AGENTS_DIR/$label.plist"
@@ -90,10 +107,10 @@ done
 for bot in $BOTS; do
   label="com.$USER_NAME.discord-bot-$bot"
   if [ "${DRY_RUN:-}" = "1" ]; then
-    echo "would run: launchctl bootout gui/$UID_NUM/$label (if loaded)"
+    echo "would run: launchctl bootout $TARGET_DOMAIN/$label (if loaded)"
   else
-    if launchctl print "gui/$UID_NUM/$label" >/dev/null 2>&1; then
-      launchctl bootout "gui/$UID_NUM/$label" 2>/dev/null || true
+    if launchctl print "$TARGET_DOMAIN/$label" >/dev/null 2>&1; then
+      launchctl bootout "$TARGET_DOMAIN/$label" 2>/dev/null || true
       sleep 1
     fi
   fi
@@ -103,8 +120,8 @@ echo ">>> 4. LaunchAgent bootstrap + kickstart"
 for bot in $BOTS; do
   plist="$AGENTS_DIR/com.$USER_NAME.discord-bot-$bot.plist"
   label="com.$USER_NAME.discord-bot-$bot"
-  run launchctl bootstrap "gui/$UID_NUM" "$plist"
-  kickstart_agent "gui/$UID_NUM/$label"
+  run launchctl bootstrap "$TARGET_DOMAIN" "$plist"
+  kickstart_agent "$TARGET_DOMAIN/$label"
 done
 
 if [ "${DRY_RUN:-}" = "1" ]; then
@@ -118,6 +135,9 @@ echo "--- bot.py processes ---"
 ps aux | grep 'bot.py' | grep -v grep | awk '{print $2, $11, $12, $13, $14}' || true
 
 echo "--- launchctl list ---"
-launchctl list | grep "com.$USER_NAME.discord-bot" || echo "WARNING: no agents listed"
+for bot in $BOTS; do
+  label="com.$USER_NAME.discord-bot-$bot"
+  launchctl print "$TARGET_DOMAIN/$label" >/dev/null 2>&1 && echo "$TARGET_DOMAIN/$label loaded" || echo "WARNING: $TARGET_DOMAIN/$label not loaded"
+done
 
 echo "Done."
