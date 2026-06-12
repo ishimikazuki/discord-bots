@@ -4,6 +4,9 @@ logs/
 sessions*.json
 .DS_Store
 .env
+.env.local
+.env.*.local
+.serena/
 __pycache__/
 *.pyc
 .worktrees/

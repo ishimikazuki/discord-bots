@@ -1,0 +1,28 @@
+{
+  "bots": {
+    "general": {
+      "name": "general",
+      "token_keychain_account": "general-bot-token",
+      "dir": "~",
+      "emoji": "home",
+      "control_channel_id": null
+    },
+    "kb": {
+      "name": "knowledge-hub",
+      "token_keychain_account": "kb-bot-token",
+      "dir": "~/knowledge-hub",
+      "emoji": "book",
+      "control_channel_id": null
+    }
+  },
+  "notify_channel_id": null,
+  "allowed_users": [
+    123456789012345678
+  ],
+  "auto_pull_before_session": true,
+  "worktree_enabled": true,
+  "codex_idle_timeout_seconds": 900,
+  "codex_hard_timeout_seconds": 3600,
+  "codex_max_concurrent_runs": 1,
+  "typing_interval_seconds": 20
+}

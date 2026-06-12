@@ -218,7 +218,10 @@ def test_runtime_files_do_not_call_claude_cli():
 
 def test_prompt_contract_replays_historical_schedule_and_card_requests(bot_module):
     root = Path(__file__).resolve().parents[1]
-    sessions = json.loads((root / "sessions-kanojo.json").read_text(encoding="utf-8"))
+    sessions_file = root / "sessions-kanojo.json"
+    if not sessions_file.exists():
+        pytest.skip("requires local ignored sessions-kanojo.json history")
+    sessions = json.loads(sessions_file.read_text(encoding="utf-8"))
     titles = [session["threadName"] for session in sessions.values()]
     schedule_like_titles = [
         title
@@ -597,6 +600,8 @@ async def test_card_summary_registers_new_threads_as_codex_sessions(monkeypatch,
 
 def test_kanojo_calendar_skill_is_visible_to_codex_and_tracked_for_new_worktrees():
     project = Path.home() / "kanojo"
+    if not project.exists():
+        pytest.skip("requires local ~/kanojo project checkout")
     skill_link = project / ".agents" / "skills"
     skill = skill_link / "screenshot-to-calendar" / "SKILL.md"
 

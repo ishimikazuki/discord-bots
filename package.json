@@ -4,7 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": ".venv/bin/python -m pytest && bash tests/test_generate_plists.sh && bash tests/test_install_macmini.sh",
+    "test:python": ".venv/bin/python -m pytest",
+    "test:launchd": "bash tests/test_generate_plists.sh && bash tests/test_install_macmini.sh"
   },
   "keywords": [],
   "author": "",

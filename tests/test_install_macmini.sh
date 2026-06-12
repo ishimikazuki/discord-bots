@@ -10,6 +10,9 @@ echo "$OUT" | grep -q "would run: launchctl bootstrap gui" || { echo "FAIL: no b
 echo "$OUT" | grep -q "would run: launchctl kickstart" || { echo "FAIL: no kickstart message"; echo "$OUT"; exit 1; }
 echo "$OUT" | grep -q "com\..*\.discord-bot-general" || { echo "FAIL: no general in dry-run output"; echo "$OUT"; exit 1; }
 echo "$OUT" | grep -q "com\..*\.discord-bot-yumekano-coe" || { echo "FAIL: no yumekano-coe in dry-run output"; echo "$OUT"; exit 1; }
+echo "$OUT" | grep -q "com.akimare.discord.general-bot" || { echo "FAIL: legacy node general bot not cleaned"; echo "$OUT"; exit 1; }
+echo "$OUT" | grep -q "com.akimare.discord.knowledge-hub-bot" || { echo "FAIL: legacy node kb bot not cleaned"; echo "$OUT"; exit 1; }
+echo "$OUT" | grep -q "com.akimare.discord.reserved-bot" || { echo "FAIL: legacy node reserved bot not cleaned"; echo "$OUT"; exit 1; }
 
 # Non-dry-run would touch system; skip
 echo "PASS (dry-run)"

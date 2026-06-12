@@ -25,6 +25,29 @@ run() {
   fi
 }
 
+kickstart_agent() {
+  local target="$1"
+  if [ "${DRY_RUN:-}" = "1" ]; then
+    echo "would run: launchctl kickstart -k $target"
+    return 0
+  fi
+
+  launchctl kickstart -k "$target" &
+  local pid=$!
+  local waited=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge 8 ]; then
+      echo "WARNING: launchctl kickstart timed out for $target; continuing" >&2
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$pid" || echo "WARNING: launchctl kickstart failed for $target" >&2
+}
+
 echo ">>> 1. 既存 bot プロセスを停止"
 if [ "${DRY_RUN:-}" = "1" ]; then
   echo "would run: pkill -9 -f '$PROJECT_DIR/bot.py'"
@@ -44,6 +67,9 @@ fi
 echo ">>> 3. 既存 LaunchAgent bootout（あれば）"
 legacy_labels=(
   "com.akimare.discord-bot"
+  "com.akimare.discord.general-bot"
+  "com.akimare.discord.knowledge-hub-bot"
+  "com.akimare.discord.reserved-bot"
   "com.akimare.bot-general"
   "com.akimare.bot-kb"
   "com.akimare.bot-reserved"
@@ -78,7 +104,7 @@ for bot in $BOTS; do
   plist="$AGENTS_DIR/com.$USER_NAME.discord-bot-$bot.plist"
   label="com.$USER_NAME.discord-bot-$bot"
   run launchctl bootstrap "gui/$UID_NUM" "$plist"
-  run launchctl kickstart -k "gui/$UID_NUM/$label"
+  kickstart_agent "gui/$UID_NUM/$label"
 done
 
 if [ "${DRY_RUN:-}" = "1" ]; then
