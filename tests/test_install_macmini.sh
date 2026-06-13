@@ -14,11 +14,14 @@ echo "$OUT" | grep -q "com\..*\.discord-bot-yumekano-coe" || { echo "FAIL: no yu
 echo "$OUT" | grep -q "com.akimare.discord.general-bot" || { echo "FAIL: legacy node general bot not cleaned"; echo "$OUT"; exit 1; }
 echo "$OUT" | grep -q "com.akimare.discord.knowledge-hub-bot" || { echo "FAIL: legacy node kb bot not cleaned"; echo "$OUT"; exit 1; }
 echo "$OUT" | grep -q "com.akimare.discord.reserved-bot" || { echo "FAIL: legacy node reserved bot not cleaned"; echo "$OUT"; exit 1; }
+echo "$OUT" | grep -q "# discord-bots-ensure-reboot" || { echo "FAIL: no @reboot ensure cron"; echo "$OUT"; exit 1; }
+echo "$OUT" | grep -q "# discord-bots-ensure-services" || { echo "FAIL: no periodic ensure cron"; echo "$OUT"; exit 1; }
 
 BG_OUT=$(DRY_RUN=1 LAUNCHD_TARGET_DOMAIN=user/501 bash "$SCRIPT" 2>&1)
 echo "$BG_OUT" | grep -q "target domain: user/501" || { echo "FAIL: no background target domain"; echo "$BG_OUT"; exit 1; }
 echo "$BG_OUT" | grep -q "limit load session type: Background" || { echo "FAIL: no background session type"; echo "$BG_OUT"; exit 1; }
 echo "$BG_OUT" | grep -q "would run: launchctl bootstrap user/501" || { echo "FAIL: no background bootstrap message"; echo "$BG_OUT"; exit 1; }
+echo "$BG_OUT" | grep -q "# discord-bots-ensure-services" || { echo "FAIL: no background periodic ensure cron"; echo "$BG_OUT"; exit 1; }
 
 # Non-dry-run would touch system; skip
 echo "PASS (dry-run)"

@@ -4,9 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": ".venv/bin/python -m pytest && bash tests/test_generate_plists.sh && bash tests/test_install_macmini.sh",
+    "test": ".venv/bin/python -m pytest && bash tests/test_generate_plists.sh && bash tests/test_install_macmini.sh && bash tests/test_ensure_macmini_services.sh",
     "test:python": ".venv/bin/python -m pytest",
-    "test:launchd": "bash tests/test_generate_plists.sh && bash tests/test_install_macmini.sh"
+    "test:launchd": "bash tests/test_generate_plists.sh && bash tests/test_install_macmini.sh && bash tests/test_ensure_macmini_services.sh"
   },
   "keywords": [],
   "author": "",

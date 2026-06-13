@@ -5,6 +5,7 @@
 # Env vars:
 #   DRY_RUN=1                  print what would happen, don't touch launchd
 #   LAUNCHD_TARGET_DOMAIN=...  override launchctl target, e.g. gui/501 or user/501
+#   SKIP_CRON_ENSURE=1         don't install the self-healing cron entries
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,6 +39,35 @@ run() {
   else
     "$@"
   fi
+}
+
+install_cron_ensure() {
+  local ensure_script="$SCRIPT_DIR/ensure-macmini-services.sh"
+  local log_file="$PROJECT_DIR/logs/ensure-services.log"
+  local reboot_entry="@reboot /bin/bash $ensure_script >> $log_file 2>&1 # discord-bots-ensure-reboot"
+  local periodic_entry="*/5 * * * * /bin/bash $ensure_script >> $log_file 2>&1 # discord-bots-ensure-services"
+
+  if [ "${SKIP_CRON_ENSURE:-}" = "1" ]; then
+    echo "cron ensure: skipped"
+    return 0
+  fi
+
+  if [ "${DRY_RUN:-}" = "1" ]; then
+    echo "would install cron entry: $reboot_entry"
+    echo "would install cron entry: $periodic_entry"
+    return 0
+  fi
+
+  mkdir -p "$PROJECT_DIR/logs"
+  local tmp
+  tmp="$(mktemp)"
+  {
+    crontab -l 2>/dev/null | grep -v '# discord-bots-ensure-' || true
+    echo "$reboot_entry"
+    echo "$periodic_entry"
+  } > "$tmp"
+  crontab "$tmp"
+  rm -f "$tmp"
 }
 
 kickstart_agent() {
@@ -124,12 +154,15 @@ for bot in $BOTS; do
   kickstart_agent "$TARGET_DOMAIN/$label"
 done
 
+echo ">>> 5. cron 自己修復ジョブを登録"
+install_cron_ensure
+
 if [ "${DRY_RUN:-}" = "1" ]; then
   echo "=== DRY RUN complete ==="
   exit 0
 fi
 
-echo ">>> 5. 起動確認（4秒待つ）"
+echo ">>> 6. 起動確認（4秒待つ）"
 sleep 4
 echo "--- bot.py processes ---"
 ps aux | grep 'bot.py' | grep -v grep | awk '{print $2, $11, $12, $13, $14}' || true

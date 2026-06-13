@@ -152,12 +152,21 @@ git pull --ff-only
 bash launchd/install-macmini.sh
 ```
 
+`launchd/install-macmini.sh` は、LaunchAgentの再登録に加えて自己修復用cronも登録します。
+
+- `@reboot`: Mac mini再起動後にTailscaleとbotを復旧
+- `*/5 * * * *`: 5分ごとにTailscaleとbotの生存確認
+- ログ: `~/discord-bots/logs/ensure-services.log`
+
+正常時はbotを再起動せず、LaunchAgentが未ロードまたは停止しているときだけ復旧します。
+
 botが反応しないときは、まず以下を見ます。
 
 ```bash
 launchctl list | grep discord-bot
 tail -80 ~/discord-bots/logs/general.err.log
 tail -80 ~/discord-bots/logs/kb.err.log
+tail -80 ~/discord-bots/logs/ensure-services.log
 ```
 
 よくある原因:
@@ -275,6 +284,13 @@ macOS LaunchAgentとして起動:
 bash setup-macmini.sh
 ```
 
+Mac miniをヘッドレス運用する場合は、起動後にユーザーがログインしていなくても復旧できるように、次も登録されます。
+
+```bash
+@reboot /bin/bash ~/discord-bots/launchd/ensure-macmini-services.sh
+*/5 * * * * /bin/bash ~/discord-bots/launchd/ensure-macmini-services.sh
+```
+
 LaunchAgentの処理だけ確認:
 
 ```bash
@@ -354,6 +370,7 @@ npm test
 .venv/bin/python -m pytest
 bash tests/test_generate_plists.sh
 bash tests/test_install_macmini.sh
+bash tests/test_ensure_macmini_services.sh
 ```
 
 ## トラブルシュート
