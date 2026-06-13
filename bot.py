@@ -126,6 +126,11 @@ CODEX_APP_RESOURCES = "/Applications/Codex.app/Contents/Resources"
 TYPING_INTERVAL_SECONDS = CONFIG.get("typing_interval_seconds", 20)
 BACKFILL_HISTORY_LIMIT = CONFIG.get("backfill_history_limit", 20)
 BACKFILL_MAX_SESSIONS = CONFIG.get("backfill_max_sessions", 200)
+BACKFILL_MESSAGE_MAX_AGE_SECONDS = CONFIG.get(
+    "backfill_message_max_age_seconds",
+    24 * 60 * 60,
+)
+DISCORD_EPOCH_MS = 1420070400000
 TEST_BOT_AUTHOR_IDS = parse_id_set(os.environ.get("DISCORD_BOT_TEST_AUTHOR_IDS"))
 TEST_MESSAGE_NONCE = os.environ.get("DISCORD_BOT_TEST_NONCE")
 
@@ -1001,17 +1006,38 @@ def _message_id_after(message_id: int | str | None, marker_id: int | str | None)
         return True
 
 
+def _message_created_at_utc(message) -> datetime | None:
+    created_at = getattr(message, "created_at", None)
+    if created_at is not None:
+        if created_at.tzinfo is None:
+            return created_at.astimezone(timezone.utc)
+        return created_at.astimezone(timezone.utc)
+
+    try:
+        snowflake_ms = (int(getattr(message, "id")) >> 22) + DISCORD_EPOCH_MS
+    except Exception:
+        return None
+    return datetime.fromtimestamp(snowflake_ms / 1000, timezone.utc)
+
+
 def _message_after_last_used(message, last_used: datetime | None) -> bool:
     if last_used is None:
         return True
-    created_at = getattr(message, "created_at", None)
+    created_at = _message_created_at_utc(message)
     if created_at is None:
         return True
-    if created_at.tzinfo is None:
-        created_at = created_at.astimezone(timezone.utc)
-    else:
-        created_at = created_at.astimezone(timezone.utc)
     return created_at > last_used
+
+
+def _message_within_backfill_window(message) -> bool:
+    max_age = BACKFILL_MESSAGE_MAX_AGE_SECONDS
+    if max_age is None or max_age <= 0:
+        return True
+    created_at = _message_created_at_utc(message)
+    if created_at is None:
+        return False
+    age_seconds = (datetime.now(timezone.utc) - created_at).total_seconds()
+    return age_seconds <= max_age
 
 
 def _should_backfill_message(message, session: dict) -> bool:
@@ -1022,6 +1048,8 @@ def _should_backfill_message(message, session: dict) -> bool:
     if getattr(message, "id", None) in _processed_messages:
         return False
     if not ((getattr(message, "content", "") or "").strip() or getattr(message, "attachments", [])):
+        return False
+    if not _message_within_backfill_window(message):
         return False
 
     marker_id = session.get("lastProcessedMessageId") or session.get("pendingSourceMessageId")

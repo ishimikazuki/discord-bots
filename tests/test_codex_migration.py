@@ -3,6 +3,7 @@ import copy
 import json
 import subprocess
 import sys
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -664,6 +665,81 @@ async def test_backfill_missed_thread_messages_replays_user_post_after_disconnec
     assert session["sessionId"] == "codex-backfilled"
     assert session["messageCount"] == 1
     assert session["lastProcessedMessageId"] == "1515191215438692505"
+
+
+@pytest.mark.asyncio
+async def test_backfill_missed_thread_messages_skips_stale_history(
+    bot_module, monkeypatch, tmp_path
+):
+    sessions_path = tmp_path / "sessions-kanojo.json"
+    stale_last_used = bot_module.datetime.now(bot_module.timezone.utc) - timedelta(days=3)
+    stale_message_time = bot_module.datetime.now(bot_module.timezone.utc) - timedelta(days=2)
+    sessions_path.write_text(json.dumps({
+        "1509849324765577358": {
+            "sessionId": "codex-old",
+            "agent": "codex",
+            "projectDir": str(tmp_path),
+            "workDir": str(tmp_path),
+            "threadName": "古いカード要約",
+            "lastUsed": stale_last_used.isoformat(),
+            "messageCount": 1,
+        }
+    }), encoding="utf-8")
+    monkeypatch.setattr(bot_module, "SESSIONS_FILE", sessions_path)
+    monkeypatch.setattr(bot_module, "ALLOWED_USERS", [123])
+    bot_module._processed_messages.clear()
+    monkeypatch.setattr(bot_module, "_backfill_running", False)
+    monkeypatch.setattr(bot_module, "_last_backfill_started_at", None)
+
+    class FakeAuthor:
+        bot = False
+        id = 123
+
+    class FakeMessage:
+        def __init__(self):
+            self.id = 1510334509462196396
+            self.author = FakeAuthor()
+            self.content = "古い未処理投稿"
+            self.attachments = []
+            self.created_at = stale_message_time
+
+    class FakeChannel:
+        id = 1509849324765577358
+
+        def __init__(self):
+            message = FakeMessage()
+            message.channel = self
+            self._messages = [message]
+
+        async def history(self, **kwargs):
+            assert kwargs["oldest_first"] is True
+            for message in self._messages:
+                yield message
+
+    class FakeClient:
+        def get_channel(self, channel_id):
+            return FakeChannel() if channel_id == 1509849324765577358 else None
+
+    codex_calls = []
+
+    async def fake_run_codex(*args):
+        codex_calls.append(args)
+        return {
+            "text": "処理しない",
+            "sessionId": "codex-should-not-run",
+            "cost": 0,
+            "usage": {},
+        }
+
+    monkeypatch.setattr(bot_module, "client", FakeClient())
+    monkeypatch.setattr(bot_module, "run_codex_code", fake_run_codex)
+
+    await bot_module.backfill_missed_thread_messages()
+
+    saved = json.loads(sessions_path.read_text(encoding="utf-8"))
+    assert codex_calls == []
+    assert saved["1509849324765577358"]["sessionId"] == "codex-old"
+    assert "lastProcessedMessageId" not in saved["1509849324765577358"]
 
 
 @pytest.mark.asyncio
