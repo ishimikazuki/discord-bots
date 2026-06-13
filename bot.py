@@ -124,6 +124,8 @@ CODEX_MAX_CONCURRENT_RUNS = CONFIG.get("codex_max_concurrent_runs", 1)
 CODEX_MODEL = CONFIG.get("codex_model")
 CODEX_APP_RESOURCES = "/Applications/Codex.app/Contents/Resources"
 TYPING_INTERVAL_SECONDS = CONFIG.get("typing_interval_seconds", 20)
+BACKFILL_HISTORY_LIMIT = CONFIG.get("backfill_history_limit", 20)
+BACKFILL_MAX_SESSIONS = CONFIG.get("backfill_max_sessions", 200)
 TEST_BOT_AUTHOR_IDS = parse_id_set(os.environ.get("DISCORD_BOT_TEST_AUTHOR_IDS"))
 TEST_MESSAGE_NONCE = os.environ.get("DISCORD_BOT_TEST_NONCE")
 
@@ -131,6 +133,8 @@ SESSIONS_FILE = Path(__file__).parent / f"sessions-{BOT_NAME}.json"
 _thread_locks: dict[int, asyncio.Lock] = {}
 _codex_semaphore = asyncio.Semaphore(CODEX_MAX_CONCURRENT_RUNS)
 _pending_recovery_started = False
+_backfill_running = False
+_last_backfill_started_at: datetime | None = None
 
 
 def get_thread_lock(channel_id: int) -> asyncio.Lock:
@@ -158,6 +162,28 @@ def save_sessions(sessions: dict) -> None:
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def parse_session_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        return dt.astimezone(timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def remember_processed_message(message_id: int) -> bool:
+    if message_id in _processed_messages:
+        return False
+    _processed_messages.add(message_id)
+    if len(_processed_messages) > 1000:
+        _processed_messages.clear()
+        _processed_messages.add(message_id)
+    return True
 
 
 def clear_pending_fields(session: dict) -> None:
@@ -638,7 +664,7 @@ async def handle_sessions(channel: discord.abc.Messageable) -> None:
 
     lines = []
     for thread_id, s in sessions.items():
-        last_used = datetime.fromisoformat(s["lastUsed"].replace("Z", "+00:00"))
+        last_used = parse_session_timestamp(s.get("lastUsed")) or datetime.now(timezone.utc)
         age = int((datetime.now(timezone.utc) - last_used).total_seconds() / 60)
         wt = " 🌿" if s.get("worktreePath") else ""
         agent = s.get("agent") or "legacy"
@@ -805,6 +831,8 @@ async def _start_session_locked(
             "lastUsed": now_iso(),
             "messageCount": 1,
         }
+        if trigger_message is not None:
+            sessions[str(thread.id)]["lastProcessedMessageId"] = str(trigger_message.id)
         save_sessions(sessions)
 
         await send_long_message(thread, result["text"])
@@ -904,6 +932,8 @@ async def _handle_thread_message_locked(message: discord.Message) -> None:
         session["agent"] = CODEX_AGENT_NAME
         session["lastUsed"] = now_iso()
         session["messageCount"] += 1
+        if getattr(message, "id", None) is not None:
+            session["lastProcessedMessageId"] = str(message.id)
         clear_pending_fields(session)
         save_sessions(sessions)
 
@@ -962,6 +992,112 @@ async def _fetch_messageable_channel(channel_id: int):
         return None
 
 
+def _message_id_after(message_id: int | str | None, marker_id: int | str | None) -> bool:
+    if not marker_id:
+        return True
+    try:
+        return int(message_id) > int(marker_id)  # Discord snowflakes are time-ordered.
+    except Exception:
+        return True
+
+
+def _message_after_last_used(message, last_used: datetime | None) -> bool:
+    if last_used is None:
+        return True
+    created_at = getattr(message, "created_at", None)
+    if created_at is None:
+        return True
+    if created_at.tzinfo is None:
+        created_at = created_at.astimezone(timezone.utc)
+    else:
+        created_at = created_at.astimezone(timezone.utc)
+    return created_at > last_used
+
+
+def _should_backfill_message(message, session: dict) -> bool:
+    if getattr(message.author, "bot", False):
+        return False
+    if ALLOWED_USERS and getattr(message.author, "id", None) not in ALLOWED_USERS:
+        return False
+    if getattr(message, "id", None) in _processed_messages:
+        return False
+    if not ((getattr(message, "content", "") or "").strip() or getattr(message, "attachments", [])):
+        return False
+
+    marker_id = session.get("lastProcessedMessageId") or session.get("pendingSourceMessageId")
+    if not _message_id_after(getattr(message, "id", None), marker_id):
+        return False
+    if marker_id:
+        return True
+
+    last_used = parse_session_timestamp(session.get("lastUsed"))
+    return _message_after_last_used(message, last_used)
+
+
+async def backfill_missed_thread_messages() -> None:
+    """Replay user messages Discord delivered while the gateway was disconnected.
+
+    discord.py reconnects automatically, but missed MESSAGE_CREATE events are not
+    replayed. We scan existing Codex session threads after reconnect and process
+    user messages newer than the session's last handled marker.
+    """
+    global _backfill_running, _last_backfill_started_at
+    now = datetime.now(timezone.utc)
+    if _backfill_running:
+        return
+    if _last_backfill_started_at and (now - _last_backfill_started_at).total_seconds() < 30:
+        return
+
+    _backfill_running = True
+    _last_backfill_started_at = now
+    try:
+        sessions = load_sessions()
+        candidates = [
+            (thread_id, session)
+            for thread_id, session in sessions.items()
+            if session.get("agent") == CODEX_AGENT_NAME and not session.get("pending")
+        ]
+        candidates.sort(
+            key=lambda item: parse_session_timestamp(item[1].get("lastUsed")) or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
+        candidates = candidates[:BACKFILL_MAX_SESSIONS]
+        processed = 0
+
+        for thread_id, session in candidates:
+            channel = await _fetch_messageable_channel(int(thread_id))
+            if channel is None:
+                continue
+
+            last_used = parse_session_timestamp(session.get("lastUsed"))
+            history_kwargs = {
+                "limit": BACKFILL_HISTORY_LIMIT,
+                "oldest_first": True,
+            }
+            if last_used:
+                history_kwargs["after"] = last_used
+
+            try:
+                async for message in channel.history(**history_kwargs):
+                    current = load_sessions().get(thread_id, session)
+                    if current.get("pending"):
+                        break
+                    if not _should_backfill_message(message, current):
+                        continue
+                    if not remember_processed_message(message.id):
+                        continue
+                    print(f"[backfill] thread={thread_id} msg={message.id}")
+                    await handle_thread_message(message)
+                    processed += 1
+            except Exception as e:
+                print(f"[backfill] failed thread={thread_id}: {e}", file=sys.stderr)
+
+        if processed:
+            print(f"[backfill] processed missed messages: {processed}")
+    finally:
+        _backfill_running = False
+
+
 async def _recover_pending_session(thread_id: str, session: dict) -> None:
     if session.get("agent") != CODEX_AGENT_NAME or not session.get("pending"):
         return
@@ -1003,6 +1139,8 @@ async def _recover_pending_session(thread_id: str, session: dict) -> None:
             "lastUsed": now_iso(),
             "messageCount": max(int(current.get("messageCount", 0)), 0) + 1,
         })
+        if current.get("pendingSourceMessageId"):
+            current["lastProcessedMessageId"] = str(current["pendingSourceMessageId"])
         clear_pending_fields(current)
         sessions[thread_id] = current
         save_sessions(sessions)
@@ -1073,6 +1211,7 @@ async def on_ready():
     if not _pending_recovery_started:
         _pending_recovery_started = True
         asyncio.create_task(recover_pending_sessions())
+    asyncio.create_task(backfill_missed_thread_messages())
 
     if BOT_NAME == "kanojo":
         from card_summary.scheduler import (
@@ -1119,6 +1258,7 @@ async def on_disconnect():
 @client.event
 async def on_resumed():
     print(f"[{BOT_NAME}] RESUMED gateway session", file=sys.stderr)
+    asyncio.create_task(backfill_missed_thread_messages())
 
 
 @client.event
@@ -1158,11 +1298,8 @@ async def _handle_message(message: discord.Message):
     if is_test_bot_message:
         print(f"[test] accepted bot-authored test message from {message.author.id}")
 
-    if message.id in _processed_messages:
+    if not remember_processed_message(message.id):
         return
-    _processed_messages.add(message.id)
-    if len(_processed_messages) > 1000:
-        _processed_messages.clear()
     if ALLOWED_USERS and message.author.id not in ALLOWED_USERS:
         return
 

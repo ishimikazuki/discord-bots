@@ -572,6 +572,101 @@ async def test_recover_pending_session_without_prompt_asks_user_to_resend(
 
 
 @pytest.mark.asyncio
+async def test_backfill_missed_thread_messages_replays_user_post_after_disconnect(
+    bot_module, monkeypatch, tmp_path
+):
+    sessions_path = tmp_path / "sessions-kanojo.json"
+    context_file = tmp_path / "card-summary.txt"
+    context_file.write_text("カードサマリー本文", encoding="utf-8")
+    sessions_path.write_text(json.dumps({
+        "1515113471082234047": {
+            "sessionId": None,
+            "agent": "codex",
+            "projectDir": str(tmp_path),
+            "workDir": str(tmp_path),
+            "threadName": "🔔 6/13 7:00",
+            "lastUsed": "2026-06-12T22:00:01+00:00",
+            "messageCount": 0,
+            "kanojo_context_file": str(context_file),
+        }
+    }), encoding="utf-8")
+    monkeypatch.setattr(bot_module, "SESSIONS_FILE", sessions_path)
+    monkeypatch.setattr(bot_module, "TypingLoop", NoopTyping)
+    monkeypatch.setattr(bot_module, "ALLOWED_USERS", [123])
+
+    class FakeAuthor:
+        bot = False
+        id = 123
+
+    class FakeMessage:
+        def __init__(self):
+            self.id = 1515191215438692505
+            self.author = FakeAuthor()
+            self.content = "それはエラーやろ。サマリーじゃなくてエラーとして吐き出せよ"
+            self.attachments = []
+            self.created_at = bot_module.datetime.fromisoformat("2026-06-13T03:08:56+00:00")
+
+    class FakeChannel:
+        id = 1515113471082234047
+
+        def __init__(self):
+            self.sent = []
+            self._messages = []
+            message = FakeMessage()
+            message.channel = self
+            self._messages.append(message)
+
+        async def history(self, **kwargs):
+            assert kwargs["oldest_first"] is True
+            for message in self._messages:
+                yield message
+
+        async def send(self, content=None, **_kwargs):
+            self.sent.append(content)
+
+    channel = FakeChannel()
+
+    class FakeClient:
+        def get_channel(self, channel_id):
+            return channel if channel_id == channel.id else None
+
+    codex_calls = []
+
+    async def fake_run_codex(work_dir, prompt, session_id):
+        codex_calls.append((work_dir, prompt, session_id))
+        return {
+            "text": "次からエラーとして出すね",
+            "sessionId": "codex-backfilled",
+            "cost": 0,
+            "usage": {},
+        }
+
+    async def fake_save_inbox(*_args, **_kwargs):
+        return []
+
+    async def fake_send_outbox(*_args, **_kwargs):
+        return 0
+
+    monkeypatch.setattr(bot_module, "client", FakeClient())
+    monkeypatch.setattr(bot_module, "run_codex_code", fake_run_codex)
+    monkeypatch.setattr(bot_module, "save_inbox_attachments", fake_save_inbox)
+    monkeypatch.setattr(bot_module, "send_outbox_files", fake_send_outbox)
+
+    await bot_module.backfill_missed_thread_messages()
+
+    saved = json.loads(sessions_path.read_text(encoding="utf-8"))
+    session = saved[str(channel.id)]
+    assert channel.sent == ["次からエラーとして出すね"]
+    assert len(codex_calls) == 1
+    assert codex_calls[0][2] is None
+    assert "カードサマリー本文" in codex_calls[0][1]
+    assert "それはエラーやろ" in codex_calls[0][1]
+    assert session["sessionId"] == "codex-backfilled"
+    assert session["messageCount"] == 1
+    assert session["lastProcessedMessageId"] == "1515191215438692505"
+
+
+@pytest.mark.asyncio
 async def test_card_summary_registers_new_threads_as_codex_sessions(monkeypatch, tmp_path):
     from card_summary import scheduler
 
